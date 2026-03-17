@@ -111,6 +111,10 @@ export default tseslint.config(
       '@typescript-eslint/no-require-imports': 'off',
 
       // --- Airbnb best-practice rules (manually carried) ---
+      'no-param-reassign': ['error', { props: true, ignorePropertyModificationsFor: [
+        'acc', 'accumulator', 'e', 'ctx', 'context', 'child',
+        'req', 'request', 'res', 'response', '$scope', 'staticContext',
+      ] }],
       'no-eval': 'error',
       'no-implied-eval': 'error',
       'prefer-const': 'error',
