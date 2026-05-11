@@ -41,6 +41,32 @@ the per-job DB-transactional update path, the retry/failure branches
 `createNextWorkItems` fan-out logic for aggregating vs. non-aggregating
 next steps.
 
+### [`work-failer.md`](work-failer.md)
+Deep dive on the work-failer service — the periodic scanner that
+synthesises failure updates for work items stuck in `RUNNING`/`QUEUED`
+past a per-(job, service) timeout. Covers the doubled-max-duration
+heuristic, the service-specific defaults (`casper`/`concise` at 15 min),
+the update-queue backpressure throttle, and why the failer hands its
+updates to the same `handleBatchWorkItemUpdatesWithJobId` entry point
+that the work-updater uses.
+
+### [`work-scheduler.md`](work-scheduler.md)
+Deep dive on the work-scheduler service — the bridge from the database
+to the per-service SQS queues. Covers the scheduler-queue input,
+backpressure against the update queue, the two-regime `numItemsToQueue`
+formula (starvation vs. steady-state, plus the `query-cmr` fast-path
+coefficient), the Fisher-Yates job-list shuffle that lets multiple
+scheduler replicas coexist, and the LRU-cached pod-count lookups.
+
+### [`service-runner.md`](service-runner.md)
+Deep dive on the service-runner — the manager container that runs in
+every backend service pod. Covers the manager/worker container split,
+the WORKING/TERMINATING file handshake with the K8s PreStop hook, the
+`runServiceFromPull` (`kubectl exec`) vs. `runQueryCmrFromPull` (local
+HTTP) split, the 100 KB inline-vs-file operation cutoff, the 137-as-OOM
+mapping, and how STAC catalogs and `error.json` are pulled back from
+S3 to populate the work-item update.
+
 ### [`service-selection.user-guide.md`](service-selection.user-guide.md)
 End-user-facing guide. How to call `/capabilities`, how Harmony picks a
 service for your request, when "best effort" applies, how to verify which
