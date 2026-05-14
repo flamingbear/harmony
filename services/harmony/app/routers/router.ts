@@ -19,6 +19,7 @@ import {
 } from '../frontends/jobs';
 import { addJobLabels, deleteJobLabels } from '../frontends/labels';
 import landingPage from '../frontends/landing-page';
+import { getJobLineage } from '../frontends/lineage';
 import * as ogcCoverageApi from '../frontends/ogc-coverages/index';
 import * as ogcEdrApi from '../frontends/ogc-edr/index';
 import getRequestMetrics from '../frontends/request-metrics';
@@ -266,8 +267,10 @@ export default function router({ USE_EDL_CLIENT_APP = 'false' }: RouterConfig): 
 
   result.get('/jobs', asyncHandler(getJobsListing));
   result.get('/jobs/:jobID', asyncHandler(getJobStatus));
+  result.get('/jobs/:jobID/lineage', asyncHandler(getJobLineage));
   result.get('/admin/jobs', asyncHandler(getJobsListing));
   result.get('/admin/jobs/:jobID', asyncHandler(getJobStatus));
+  result.get('/admin/jobs/:jobID/lineage', asyncHandler(getJobLineage));
 
   result.post('/jobs/:jobID/cancel', asyncHandler(cancelJob));
   result.post('/admin/jobs/:jobID/cancel', asyncHandler(cancelJob));
