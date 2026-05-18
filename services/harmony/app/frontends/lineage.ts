@@ -4,7 +4,8 @@ import HarmonyRequest from '../models/harmony-request';
 import { TEXT_LIMIT } from '../models/job';
 import WorkItem, { queryAll as queryWorkItems } from '../models/work-item';
 import {
-  getItemLogsLocation, getStacLocation, WorkItemQuery, WorkItemStatus,
+  COMPLETED_WORK_ITEM_STATUSES, getItemLogsLocation, getStacLocation,
+  WorkItemQuery, WorkItemStatus,
 } from '../models/work-item-interface';
 import WorkflowStep, { getWorkflowStepsByJobId } from '../models/workflow-steps';
 import { s3UrlForStoredQueryParams } from '../util/cmr';
@@ -23,9 +24,6 @@ const VALID_STATUSES: WorkItemStatus[] = [
   WorkItemStatus.SUCCESSFUL, WorkItemStatus.FAILED, WorkItemStatus.CANCELED,
   WorkItemStatus.WARNING,
 ];
-const VALID_EXPAND = ['inputs', 'outputs', 'both'] as const;
-type ExpandMode = typeof VALID_EXPAND[number];
-
 // Allow-list of user-facing fields surfaced from the parsed DataOperation.
 // Internal fields (accessToken, callback, stagingLocation, user, client, version,
 // requestId, isSynchronous, $schema) are intentionally excluded. An allow-list
@@ -39,16 +37,16 @@ interface LineageQuery {
   step?: number;
   status?: WorkItemStatus;
   workItem?: number;
-  expand?: ExpandMode;
   page: number;
   perPage: number;
 }
 
 interface ResolvedCatalog {
   catalog: string;
-  // null when ?expand= did not request resolution for this side; an array
-  // (possibly empty) when it did. Empty array = expansion ran but found no
-  // data assets (e.g. a failed WI whose output catalog is missing).
+  // null  = the owning WI hasn't completed yet (no catalog to read).
+  // []    = the WI completed but the catalog had no data assets (e.g. failed
+  //         WI whose output catalog is missing, or a catalog with no items).
+  // [...] = resolved data hrefs from the STAC catalog.
   files: string[] | null;
 }
 
@@ -110,14 +108,6 @@ function parseQuery(query: Record<string, unknown>): LineageQuery {
     out.workItem = n;
   }
 
-  if (query.expand !== undefined) {
-    const e = String(query.expand) as ExpandMode;
-    if (!VALID_EXPAND.includes(e)) {
-      throw new RequestValidationError(`expand must be one of: ${VALID_EXPAND.join(', ')}`);
-    }
-    out.expand = e;
-  }
-
   if (query.page !== undefined) {
     const n = Number(query.page);
     if (!Number.isInteger(n) || n < 1) {
@@ -176,27 +166,52 @@ async function resolveDataHrefs(catalogUrl: string): Promise<string[]> {
 }
 
 /**
- * Build the work item portion of the response. When expand is requested, the
- * relevant catalog(s) are read from S3 and inlined as files[].
+ * Resolve every unique catalog URL referenced by completed work items in
+ * parallel. Only WIs in COMPLETED_WORK_ITEM_STATUSES contribute URLs;
+ * incomplete WIs reliably have no catalog yet, so attempting to read theirs
+ * would be wasted 404s. Because step N's output catalog is byte-identical
+ * to step N+1's input catalog, the Set-based dedupe ensures each unique
+ * catalog is fetched exactly once across the whole page.
+ *
+ * Returns a map from catalog URL to its data hrefs (empty array when the
+ * catalog is missing or has no data assets). Catalog URLs NOT in the map
+ * belong to incomplete WIs; the handler treats those as `files: null`.
  */
-async function buildWorkItem(
+async function resolveAllCatalogs(
+  workItems: WorkItem[],
+): Promise<Map<string, string[]>> {
+  const urls = new Set<string>();
+  for (const wi of workItems) {
+    if (!COMPLETED_WORK_ITEM_STATUSES.includes(wi.status)) continue;
+    if (wi.stacCatalogLocation) urls.add(wi.stacCatalogLocation);
+    urls.add(getStacLocation({ id: wi.id, jobID: wi.jobID }, 'catalog.json'));
+  }
+  const entries = await Promise.all(
+    Array.from(urls).map(async (url) => [url, await resolveDataHrefs(url)] as const),
+  );
+  return new Map(entries);
+}
+
+/**
+ * Build the work item portion of the response. files[] is populated from
+ * the precomputed `resolved` map; URLs missing from the map (because the
+ * WI was incomplete when resolveAllCatalogs ran) surface as `files: null`.
+ */
+function buildWorkItem(
   wi: WorkItem,
-  expand: ExpandMode | undefined,
-): Promise<LineageWorkItem> {
+  resolved: Map<string, string[]>,
+): LineageWorkItem {
+  const outputCatalog = getStacLocation({ id: wi.id, jobID: wi.jobID }, 'catalog.json');
   const input: ResolvedCatalog | null = wi.stacCatalogLocation
-    ? { catalog: wi.stacCatalogLocation, files: null }
+    ? {
+      catalog: wi.stacCatalogLocation,
+      files: resolved.get(wi.stacCatalogLocation) ?? null,
+    }
     : null;
   const output: ResolvedCatalog = {
-    catalog: getStacLocation({ id: wi.id, jobID: wi.jobID }, 'catalog.json'),
-    files: null,
+    catalog: outputCatalog,
+    files: resolved.get(outputCatalog) ?? null,
   };
-
-  if (input && (expand === 'inputs' || expand === 'both')) {
-    input.files = await resolveDataHrefs(input.catalog);
-  }
-  if (expand === 'outputs' || expand === 'both') {
-    output.files = await resolveDataHrefs(output.catalog);
-  }
 
   return {
     id: wi.id,
@@ -242,6 +257,7 @@ async function buildCmrCalls(
 async function buildSteps(
   steps: WorkflowStep[],
   workItems: WorkItem[],
+  resolved: Map<string, string[]>,
   q: LineageQuery,
 ): Promise<LineageStep[]> {
   const byStep = new Map<number, WorkItem[]>();
@@ -263,7 +279,7 @@ async function buildSteps(
       hasAggregatedOutput: step.hasAggregatedOutput,
       isComplete: step.is_complete,
       workItemCount: step.workItemCount,
-      workItems: await Promise.all(stepWorkItems.map((wi) => buildWorkItem(wi, q.expand))),
+      workItems: stepWorkItems.map((wi) => buildWorkItem(wi, resolved)),
     };
 
     const cmrWorkItems = stepWorkItems.filter((wi) => wi.scrollID);
@@ -313,7 +329,8 @@ export async function getJobLineage(
       db, workItemQuery, q.page, q.perPage,
     );
 
-    const lineageSteps = await buildSteps(steps, workItems, q);
+    const resolvedCatalogs = await resolveAllCatalogs(workItems);
+    const lineageSteps = await buildSteps(steps, workItems, resolvedCatalogs, q);
 
     // The DataOperation is largely the same across steps (it gets passed
     // step-to-step with minor mutations); surface it once at the response
