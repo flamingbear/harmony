@@ -122,9 +122,9 @@ describe('GET /jobs/:jobID/lineage', function () {
       expect(body.jobID).to.equal(ownerJob.jobID);
       expect(body.status).to.equal('failed');
       expect(body.username).to.equal('joe');
-      expect(body.originalRequest.url).to.equal('https://harmony.example/foo?bar=baz');
-      expect(body.originalRequest.body).to.be.null;
-      expect(body.originalRequest.truncated).to.equal(false);
+      expect(body.request.url).to.equal('https://harmony.example/foo?bar=baz');
+      expect(body.request.body).to.be.null;
+      expect(body.request.truncated).to.equal(false);
     });
 
     it('includes both workflow steps with serviceID, stepIndex, and flags', function () {
