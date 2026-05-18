@@ -348,11 +348,10 @@ export async function getJobLineage(
       progress: job.progress,
       message: job.message,
       username: job.username,
-      request: job.request,
       numInputGranules: job.numInputGranules,
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,
-      originalRequest: {
+      request: {
         url: job.request,
         method: 'GET',
         body: null as unknown,

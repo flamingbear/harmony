@@ -53,7 +53,7 @@ response and is the bound on `?expand=` cost.
   "createdAt": "2026-05-12T08:42:04.123Z",
   "updatedAt": "2026-05-12T08:46:37.000Z",
 
-  "originalRequest": {
+  "request": {
     "url": "https://harmony.../ogc-api-coverages/...?...",
     "method": "GET",
     "body": null,
@@ -174,8 +174,8 @@ the lineage endpoint reports.
 | Field | Source |
 |-------|--------|
 | Job-level fields | `Job.byJobID` (`services/harmony/app/models/job.ts`) |
-| `originalRequest.url` | `jobs.request` column, stored at job creation; max 4096 chars. The `truncated` flag is set when `length === 4096`. |
-| `originalRequest.method`/`body` | Not stored today; `body` is always `null` and `bodyNote` explains. Becomes populated by the Option B follow-up below. |
+| `request.url` | `jobs.request` column, stored at job creation; max 4096 chars. The `truncated` flag is set when `length === 4096`. |
+| `request.method`/`body` | Not stored today; `body` is always `null` and `bodyNote` explains. Becomes populated by the Option B follow-up below. |
 | Steps | `getWorkflowStepsByJobId` (`workflow-steps.ts:182`) — includes the `operation` JSON string per step (not exposed per-step; see `operation` row below). |
 | `operation` | One canonical block at the response root, derived from step 1's stored `workflow_steps.operation` JSON. Projected to an allow-list: `sources`, `format`, `subset`, `extendDimensions`, `temporal`, `concatenate`, `average`, `pixelSubset`, `extraArgs`. Internal fields (`accessToken`, `callback`, `stagingLocation`, `user`, `client`, `version`, `requestId`, `isSynchronous`, `$schema`) are dropped. The operation is largely identical across steps, so we surface it once instead of duplicating per step. |
 | Work items | `queryAll` (`work-item.ts:417`) with a `WorkItemQuery.where` clause containing `jobID` + any of `workflowStepIndex`/`status`/`id`. Filters run in SQL; results paginated with `isLengthAware` so total counts are accurate. |
@@ -203,7 +203,7 @@ These are intentional gaps in v1. Each is surfaced honestly in the response
 (via `bodyNote`, `truncated`, or by being null) rather than hidden.
 
 1. **POST request body is not persisted.** Harmony stores the request URL
-   but not the JSON or form body of POSTs. For POST jobs, `originalRequest.body`
+   but not the JSON or form body of POSTs. For POST jobs, `request.body`
    is null. The Option B follow-up below addresses this.
 2. **GET URL is capped at 4096 chars on save.** The `jobs.request` column is
    varchar; `Job.save()` truncates beyond 4096. URLs longer than that are
@@ -249,7 +249,7 @@ case independently of total job size.
 Add a write at job-creation time that uploads the raw POST body to
 `s3://{artifactBucket}/{jobID}/request.json`. The lineage handler then
 attempts to read this object and, when present, populates
-`originalRequest.body`. Scope (per the prior design discussion):
+`request.body`. Scope (per the prior design discussion):
 
 - POST JSON bodies only. GET URLs continue to come from `jobs.request`.
 - TEXT migration on `jobs.request` is **out of scope**. The 4096 cap stays.
@@ -257,5 +257,5 @@ attempts to read this object and, when present, populates
   location) is out of scope.
 
 This is a separate PR. The lineage endpoint code already accommodates it —
-when `request.json` does not exist, `originalRequest.body` is null and the
+when `request.json` does not exist, `request.body` is null and the
 explanatory `bodyNote` is included.
