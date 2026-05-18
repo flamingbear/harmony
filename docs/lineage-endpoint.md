@@ -30,7 +30,7 @@ access token may view.
 | `step` | integer | Limit to one workflow step (filters work items by `workflowStepIndex`). |
 | `status` | one of the `WorkItemStatus` values | Limit to work items in a single status. |
 | `workItem` | integer | Limit to a single work item by id. |
-| `expand` | `inputs` \| `outputs` \| `both` | Read the relevant STAC catalogs from S3 and resolve the data hrefs into the `files[]` array on each work item in the current page. Without `expand`, `files` is always present but set to `null` so its existence is discoverable from the default response. |
+| (none — see `files` contract below) | — | The endpoint always resolves STAC catalogs into `files[]` for completed work items. There is no opt-in flag; intermediate data files are the primary value of the endpoint. |
 | `page` | integer (default 1) | Page number for work items. |
 | `perPage` | integer (default 100, max 1000) | Page size for work items. |
 
@@ -112,7 +112,7 @@ response and is the bound on `?expand=` cost.
           "input": null,
           "output": {
             "catalog": "s3://artifacts/<jobID>/9491393/outputs/catalog.json",
-            "files": null
+            "files": ["s3://staging-bucket/.../granule_xyz.nc4"]
           },
           "logs": "s3://artifacts/<jobID>/9491393/logs.json"
         }
@@ -134,8 +134,8 @@ response and is the bound on `?expand=` cost.
           "retryCount": 0,
           "startedAt": "2026-05-12T08:43:12.000Z",
           "duration": 1234,
-          "input":  { "catalog": "s3://artifacts/<jobID>/9491393/outputs/catalog.json", "files": null },
-          "output": { "catalog": "s3://artifacts/<jobID>/9491415/outputs/catalog.json", "files": null },
+          "input":  { "catalog": "s3://artifacts/<jobID>/9491393/outputs/catalog.json", "files": ["s3://staging-bucket/.../granule_xyz.nc4"] },
+          "output": { "catalog": "s3://artifacts/<jobID>/9491415/outputs/catalog.json", "files": [] },
           "logs":   "s3://artifacts/<jobID>/9491415/logs.json"
         }
       ]
@@ -144,17 +144,20 @@ response and is the bound on `?expand=` cost.
 }
 ```
 
-With `?workItem=9491415&expand=inputs`, the matching work item's `input` is
-augmented:
+### The `files` contract
 
-```json
-"input": {
-  "catalog": "s3://artifacts/<jobID>/9491393/outputs/catalog.json",
-  "files": [
-    "s3://staging-bucket/.../granule_xyz.nc4"
-  ]
-}
-```
+Every `input` and `output` has both a `catalog` URL and a `files` value:
+
+| `files` value | What it means |
+|---|---|
+| `null` | The owning work item has not completed yet. The `catalog` URL is the deterministic S3 path the output *will* land at. |
+| `[]` | The work item completed but the catalog was missing, unreadable, or had no STAC items with `role: 'data'`. Common case: a failed WI whose service didn't write its output catalog. |
+| `["s3://..."]` | The catalog was read; these are the data hrefs (verbatim — Harmony does not rewrite `s3://` vs `https://`). |
+
+The handler resolves catalogs only for WIs in `COMPLETED_WORK_ITEM_STATUSES`
+(`successful`, `failed`, `canceled`, `warning`). Incomplete WIs (`ready`,
+`queued`, `running`) never trigger S3 reads, so a running job's lineage
+returns quickly with `files: null` everywhere.
 
 `files[]` comes from walking the STAC catalog: `catalog.json` (which lists
 `./catalogN.json` item links), then each item file's `assets[*].href` where
@@ -182,7 +185,7 @@ the lineage endpoint reports.
 | `logs` | Deterministic: `getItemLogsLocation(workItem)` in `work-item-interface.ts:128` |
 | `cmr.params` | For each query-cmr work item, one S3 GET of `s3UrlForStoredQueryParams(scrollID)` (`cmr.ts:1315`) |
 | `cmr.endpoint` | `env.cmrEndpoint` |
-| Expanded `files[]` | `readCatalogItems(catalogUrl)` then `getCatalogLinks(items)` in `services/harmony/app/util/stac.ts` |
+| `files[]` for completed WIs | `readCatalogItems(catalogUrl)` then `getCatalogLinks(items)` in `services/harmony/app/util/stac.ts`. The handler collects the unique set of catalog URLs across all *completed* WIs on the current page and resolves them with `Promise.all`, so duplicated catalogs (step N output ≡ step N+1 input) cost a single S3 GET and incomplete WIs cost zero. |
 
 ## Redactions
 
@@ -227,15 +230,19 @@ These are intentional gaps in v1. Each is surfaced honestly in the response
 
 ## Cost
 
-Default response (no `expand`): one DB read for the job, one for the
-workflow steps, one paginated SQL query for the work items (bounded by
-`perPage`, default 100). Plus one S3 GET per query-cmr work item on the
-current page for the CMR `serializedQuery` (typically 1 per job).
+Per request: one DB read for the job, one for the workflow steps, one
+paginated SQL query for the work items (bounded by `perPage`, default 100),
+plus one S3 GET per query-cmr work item on the current page for the CMR
+`serializedQuery` (typically 1 per job).
 
-With `?expand=`: an additional `1 + N` S3 GETs per work item *on the
-current page*, where N is the number of STAC items in that work item's
-catalog. N is typically 1–10. `perPage` (default 100, max 1000) bounds the
-worst case independently of total job size.
+STAC resolution: the handler builds the set of unique catalog URLs across
+the *completed* WIs on the page (input + output sides, deduplicated) and
+resolves them in parallel via `Promise.all`. For a typical chain where
+each step's output ≡ next step's input, this is `S` catalog reads for
+`S` steps' worth of WIs on the page, plus `~1` STAC item GET per catalog.
+Incomplete WIs are skipped, so a running job's lineage costs essentially
+nothing in S3 reads. `perPage` (default 100, max 1000) bounds the worst
+case independently of total job size.
 
 ## Follow-up work (Option B): persist POST request bodies
 

@@ -28,6 +28,12 @@ const ownerJob = buildJob({
   request: 'https://harmony.example/foo?bar=baz',
 });
 
+const runningJob = buildJob({
+  username: 'joe',
+  status: JobStatus.RUNNING,
+  request: 'https://harmony.example/running',
+});
+
 describe('GET /jobs/:jobID/lineage', function () {
   hookServersStartStop({ USE_EDL_CLIENT_APP: true });
   hookTransaction();
@@ -69,6 +75,27 @@ describe('GET /jobs/:jobID/lineage', function () {
       stacCatalogLocation: `s3://artifacts/${ownerJob.jobID}/1/outputs/catalog.json`,
     });
     await wi2.save(this.trx);
+
+    // A second job that's still running, with a single READY work item — used
+    // to verify that incomplete WIs surface as files: null and that no S3
+    // resolution is attempted on them.
+    await runningJob.save(this.trx);
+    const runningStep = buildWorkflowStep({
+      jobID: runningJob.jobID,
+      stepIndex: 1,
+      serviceID: 'harmonyservices/query-cmr:latest',
+      workItemCount: 1,
+      operation: validOperation,
+    });
+    await runningStep.save(this.trx);
+    const runningWi = buildWorkItem({
+      jobID: runningJob.jobID,
+      workflowStepIndex: 1,
+      serviceID: 'harmonyservices/query-cmr:latest',
+      status: WorkItemStatus.READY,
+    });
+    await runningWi.save(this.trx);
+
     await this.trx.commit();
   });
 
@@ -142,14 +169,18 @@ describe('GET /jobs/:jobID/lineage', function () {
       expect(wi2.status).to.equal('failed');
     });
 
-    it('renders files as null on the default response so the field is discoverable', function () {
+    it('always resolves files for completed work items', function () {
       const body = JSON.parse(this.res.text);
       const wi1 = body.steps[0].workItems[0];
       const wi2 = body.steps[1].workItems[0];
-      // input is null for query-cmr (no STAC input), so files only applies to output
-      expect(wi1.output).to.have.property('files', null);
-      expect(wi2.input).to.have.property('files', null);
-      expect(wi2.output).to.have.property('files', null);
+      // Both fixtures are in completed states (SUCCESSFUL / FAILED). Their
+      // catalogs do not exist in test S3, so resolveDataHrefs catches the
+      // error and returns []. The contract is: completed WI => array (not
+      // null), incomplete WI => null. The empty array confirms resolution
+      // was attempted.
+      expect(wi1.output.files).to.be.an('array');
+      expect(wi2.input.files).to.be.an('array');
+      expect(wi2.output.files).to.be.an('array');
     });
 
     it('attaches a cmr block (with endpoint) to the query-cmr step', function () {
@@ -202,6 +233,17 @@ describe('GET /jobs/:jobID/lineage', function () {
       expect(body.pagination.lastPage).to.equal(2);
       const totalReturnedWIs = body.steps.reduce((acc, s) => acc + s.workItems.length, 0);
       expect(totalReturnedWIs).to.equal(1);
+    });
+  });
+
+  describe('For a job whose work item is still incomplete', function () {
+    hookJobLineage({ jobID: runningJob.jobID, username: 'joe' });
+    it('leaves files as null and does not attempt resolution', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      const wi = body.steps[0].workItems[0];
+      expect(wi.status).to.equal('ready');
+      expect(wi.output.files).to.equal(null);
     });
   });
 
