@@ -2,19 +2,22 @@ import { NextFunction, Response } from 'express';
 
 import HarmonyRequest from '../models/harmony-request';
 import { TEXT_LIMIT } from '../models/job';
-import WorkItem, { getWorkItemsByJobId } from '../models/work-item';
-import { getItemLogsLocation, getStacLocation, WorkItemStatus } from '../models/work-item-interface';
+import WorkItem, { queryAll as queryWorkItems } from '../models/work-item';
+import {
+  getItemLogsLocation, getStacLocation, WorkItemQuery, WorkItemStatus,
+} from '../models/work-item-interface';
 import WorkflowStep, { getWorkflowStepsByJobId } from '../models/workflow-steps';
 import { s3UrlForStoredQueryParams } from '../util/cmr';
 import db from '../util/db';
 import { isAdminUser } from '../util/edl-api';
 import env from '../util/env';
-import { HttpError, RequestValidationError } from '../util/errors';
+import { RequestValidationError } from '../util/errors';
 import { getJobIfAllowed } from '../util/job';
 import { defaultObjectStore } from '../util/object-store';
 import { getCatalogLinks, readCatalogItems } from '../util/stac';
 
-const DEFAULT_MAX_EXPANDED = 500;
+const DEFAULT_PER_PAGE = 100;
+const MAX_PER_PAGE = 1000;
 const VALID_STATUSES: WorkItemStatus[] = [
   WorkItemStatus.READY, WorkItemStatus.QUEUED, WorkItemStatus.RUNNING,
   WorkItemStatus.SUCCESSFUL, WorkItemStatus.FAILED, WorkItemStatus.CANCELED,
@@ -23,17 +26,30 @@ const VALID_STATUSES: WorkItemStatus[] = [
 const VALID_EXPAND = ['inputs', 'outputs', 'both'] as const;
 type ExpandMode = typeof VALID_EXPAND[number];
 
+// Allow-list of user-facing fields surfaced from the parsed DataOperation.
+// Internal fields (accessToken, callback, stagingLocation, user, client, version,
+// requestId, isSynchronous, $schema) are intentionally excluded. An allow-list
+// avoids leaking newly added internal fields when the operation schema evolves.
+const OPERATION_PUBLIC_FIELDS = [
+  'sources', 'format', 'subset', 'extendDimensions', 'temporal',
+  'concatenate', 'average', 'pixelSubset', 'extraArgs',
+] as const;
+
 interface LineageQuery {
   step?: number;
   status?: WorkItemStatus;
   workItem?: number;
   expand?: ExpandMode;
-  max: number;
+  page: number;
+  perPage: number;
 }
 
 interface ResolvedCatalog {
   catalog: string;
-  files?: string[];
+  // null when ?expand= did not request resolution for this side; an array
+  // (possibly empty) when it did. Empty array = expansion ran but found no
+  // data assets (e.g. a failed WI whose output catalog is missing).
+  files: string[] | null;
 }
 
 interface LineageWorkItem {
@@ -56,7 +72,6 @@ interface LineageStep {
   hasAggregatedOutput: boolean;
   isComplete: boolean;
   workItemCount: number;
-  operation: Record<string, unknown> | null;
   cmr?: {
     endpoint: string;
     calls: { workItemId: number; sessionKey: string; params: unknown }[];
@@ -64,18 +79,12 @@ interface LineageStep {
   workItems: LineageWorkItem[];
 }
 
-class PayloadTooLargeError extends HttpError {
-  constructor(message: string) {
-    super(413, message);
-  }
-}
-
 /**
  * Parse the query parameters used to filter and shape the lineage response.
  * Throws RequestValidationError on any invalid input.
  */
 function parseQuery(query: Record<string, unknown>): LineageQuery {
-  const out: LineageQuery = { max: DEFAULT_MAX_EXPANDED };
+  const out: LineageQuery = { page: 1, perPage: DEFAULT_PER_PAGE };
 
   if (query.step !== undefined) {
     const n = Number(query.step);
@@ -109,23 +118,35 @@ function parseQuery(query: Record<string, unknown>): LineageQuery {
     out.expand = e;
   }
 
-  if (query.max !== undefined) {
-    const n = Number(query.max);
+  if (query.page !== undefined) {
+    const n = Number(query.page);
     if (!Number.isInteger(n) || n < 1) {
-      throw new RequestValidationError('max must be a positive integer');
+      throw new RequestValidationError('page must be a positive integer');
     }
-    out.max = n;
+    out.page = n;
+  }
+
+  if (query.perPage !== undefined) {
+    const n = Number(query.perPage);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_PER_PAGE) {
+      throw new RequestValidationError(`perPage must be a positive integer no greater than ${MAX_PER_PAGE}`);
+    }
+    out.perPage = n;
   }
 
   return out;
 }
 
 /**
- * Parse the workflow step's stored operation JSON and strip the encrypted
- * accessToken before exposing the operation in the response. Returns null if
- * the operation string is empty or cannot be parsed.
+ * Parse a workflow step's stored operation JSON and project it down to the
+ * curated allow-list of user-facing fields. Returns null if the JSON cannot
+ * be parsed. The allow-list ensures internal fields (accessToken, callback,
+ * stagingLocation, etc.) are never leaked, even if the operation schema gains
+ * new fields in the future.
  */
-function sanitizeOperation(operationJson: string): Record<string, unknown> | null {
+function pickPublicOperationFields(
+  operationJson: string,
+): Record<string, unknown> | null {
   if (!operationJson) return null;
   let parsed: Record<string, unknown>;
   try {
@@ -133,8 +154,11 @@ function sanitizeOperation(operationJson: string): Record<string, unknown> | nul
   } catch {
     return null;
   }
-  delete parsed.accessToken;
-  return parsed;
+  const out: Record<string, unknown> = {};
+  for (const key of OPERATION_PUBLIC_FIELDS) {
+    if (parsed[key] !== undefined) out[key] = parsed[key];
+  }
+  return out;
 }
 
 /**
@@ -160,10 +184,11 @@ async function buildWorkItem(
   expand: ExpandMode | undefined,
 ): Promise<LineageWorkItem> {
   const input: ResolvedCatalog | null = wi.stacCatalogLocation
-    ? { catalog: wi.stacCatalogLocation }
+    ? { catalog: wi.stacCatalogLocation, files: null }
     : null;
   const output: ResolvedCatalog = {
     catalog: getStacLocation({ id: wi.id, jobID: wi.jobID }, 'catalog.json'),
+    files: null,
   };
 
   if (input && (expand === 'inputs' || expand === 'both')) {
@@ -210,20 +235,9 @@ async function buildCmrCalls(
 }
 
 /**
- * Apply the step/status/workItem filters to the loaded work items.
- */
-function filterWorkItems(workItems: WorkItem[], q: LineageQuery): WorkItem[] {
-  return workItems.filter((wi) => {
-    if (q.step !== undefined && wi.workflowStepIndex !== q.step) return false;
-    if (q.status !== undefined && wi.status !== q.status) return false;
-    if (q.workItem !== undefined && wi.id !== q.workItem) return false;
-    return true;
-  });
-}
-
-/**
- * Build the full lineage step list, including CMR enrichment for query-cmr
- * steps. Each step's workItems[] is the filtered, expanded subset.
+ * Build the full lineage step list. The workItems passed in are already
+ * the filtered, paginated set; this function groups them under their parent
+ * step. Steps whose stepIndex was filtered out by ?step= are omitted.
  */
 async function buildSteps(
   steps: WorkflowStep[],
@@ -249,7 +263,6 @@ async function buildSteps(
       hasAggregatedOutput: step.hasAggregatedOutput,
       isComplete: step.is_complete,
       workItemCount: step.workItemCount,
-      operation: sanitizeOperation(step.operation),
       workItems: await Promise.all(stepWorkItems.map((wi) => buildWorkItem(wi, q.expand))),
     };
 
@@ -269,8 +282,9 @@ async function buildSteps(
 
 /**
  * Express handler for GET /jobs/:jobID/lineage. Returns a JSON document
- * describing the job, its workflow steps, and the inputs/outputs of every
- * work item. See docs/lineage-endpoint.md for the response shape.
+ * describing the job, its workflow steps, and the inputs/outputs of the
+ * filtered + paginated work items. See docs/lineage-endpoint.md for the
+ * response shape.
  */
 export async function getJobLineage(
   req: HarmonyRequest, res: Response, next: NextFunction,
@@ -284,20 +298,31 @@ export async function getJobLineage(
 
     const steps = await getWorkflowStepsByJobId(db, jobID);
 
-    // Load every work item for the job (no DB-level filter; jobs are at most
-    // ~500 WIs in practice and the per-WI rows are small). Filtering and
-    // expansion happen in memory below.
-    const { workItems: allWorkItems } = await getWorkItemsByJobId(db, jobID, 1, Number.MAX_SAFE_INTEGER);
-    const filtered = filterWorkItems(allWorkItems, q);
+    // Push every filter into the SQL WHERE clause so a million-WI job never
+    // round-trips a million rows. queryAll paginates with isLengthAware so
+    // we get total counts for pagination metadata.
+    const workItemQuery: WorkItemQuery = {
+      where: { jobID },
+      orderBy: { field: 'id', value: 'asc' },
+    };
+    if (q.step !== undefined) workItemQuery.where.workflowStepIndex = q.step;
+    if (q.status !== undefined) workItemQuery.where.status = q.status;
+    if (q.workItem !== undefined) workItemQuery.where.id = q.workItem;
 
-    if (q.expand && filtered.length > q.max) {
-      throw new PayloadTooLargeError(
-        `expand would resolve ${filtered.length} work items, exceeding max=${q.max}. ` +
-        'Narrow with ?step=, ?status=, or ?workItem=, or raise ?max=.',
-      );
-    }
+    const { workItems, pagination } = await queryWorkItems(
+      db, workItemQuery, q.page, q.perPage,
+    );
 
-    const lineageSteps = await buildSteps(steps, filtered, q);
+    const lineageSteps = await buildSteps(steps, workItems, q);
+
+    // The DataOperation is largely the same across steps (it gets passed
+    // step-to-step with minor mutations); surface it once at the response
+    // root using the first step as the canonical "what was asked of Harmony"
+    // view, projected down to user-facing fields.
+    const canonicalOperationStep = steps.find((s) => s.stepIndex === 1) ?? steps[0];
+    const operation = canonicalOperationStep
+      ? pickPublicOperationFields(canonicalOperationStep.operation)
+      : null;
 
     const requestTruncated = !!job.request && job.request.length === TEXT_LIMIT;
     const lineage = {
@@ -314,9 +339,15 @@ export async function getJobLineage(
         url: job.request,
         method: 'GET',
         body: null as unknown,
-        bodyNote: 'POST request bodies are not persisted by Harmony today. '
-          + 'When the artifact-bucket follow-up lands, JSON bodies will appear here.',
+        bodyNote: 'POST request bodies are not yet persisted by Harmony.',
         truncated: requestTruncated,
+      },
+      operation,
+      pagination: {
+        currentPage: pagination.currentPage,
+        perPage: pagination.perPage,
+        total: pagination.total,
+        lastPage: pagination.lastPage,
       },
       steps: lineageSteps,
     };

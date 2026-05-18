@@ -110,11 +110,25 @@ describe('GET /jobs/:jobID/lineage', function () {
       expect(body.steps[0]).to.include.keys('isBatched', 'hasAggregatedOutput', 'isComplete');
     });
 
-    it('strips accessToken from every step.operation', function () {
+    it('exposes one curated operation at the response root, not per step', function () {
       const body = JSON.parse(this.res.text);
+      expect(body.operation).to.be.an('object');
+      // Allow-listed user-facing fields the curator forwards (when present
+      // on the source operation) — at minimum, sources should appear.
+      expect(body.operation).to.include.keys('sources');
+      // Internal / sensitive fields must not leak through the allow-list.
+      expect(body.operation).to.not.have.property('accessToken');
+      expect(body.operation).to.not.have.property('callback');
+      expect(body.operation).to.not.have.property('stagingLocation');
+      expect(body.operation).to.not.have.property('requestId');
+      expect(body.operation).to.not.have.property('user');
+      expect(body.operation).to.not.have.property('client');
+      expect(body.operation).to.not.have.property('version');
+      expect(body.operation).to.not.have.property('isSynchronous');
+      expect(body.operation).to.not.have.property('$schema');
+      // Steps no longer carry a per-step operation field.
       for (const step of body.steps) {
-        expect(step.operation).to.be.an('object');
-        expect(step.operation).to.not.have.property('accessToken');
+        expect(step).to.not.have.property('operation');
       }
     });
 
@@ -126,6 +140,16 @@ describe('GET /jobs/:jobID/lineage', function () {
       expect(wi1.logs).to.match(new RegExp(`^s3://.*/${ownerJob.jobID}/${wi1.id}/logs\\.json$`));
       expect(wi2.input.catalog).to.equal(`s3://artifacts/${ownerJob.jobID}/1/outputs/catalog.json`);
       expect(wi2.status).to.equal('failed');
+    });
+
+    it('renders files as null on the default response so the field is discoverable', function () {
+      const body = JSON.parse(this.res.text);
+      const wi1 = body.steps[0].workItems[0];
+      const wi2 = body.steps[1].workItems[0];
+      // input is null for query-cmr (no STAC input), so files only applies to output
+      expect(wi1.output).to.have.property('files', null);
+      expect(wi2.input).to.have.property('files', null);
+      expect(wi2.output).to.have.property('files', null);
     });
 
     it('attaches a cmr block (with endpoint) to the query-cmr step', function () {
@@ -168,6 +192,19 @@ describe('GET /jobs/:jobID/lineage', function () {
     });
   });
 
+  describe('Pagination with ?perPage=1', function () {
+    hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { perPage: 1 } });
+    it('returns one work item with pagination metadata indicating more pages', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      expect(body.pagination.perPage).to.equal(1);
+      expect(body.pagination.total).to.equal(2);
+      expect(body.pagination.lastPage).to.equal(2);
+      const totalReturnedWIs = body.steps.reduce((acc, s) => acc + s.workItems.length, 0);
+      expect(totalReturnedWIs).to.equal(1);
+    });
+  });
+
   describe('Validation errors', function () {
     describe('?status=bogus', function () {
       hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { status: 'bogus' } });
@@ -176,10 +213,10 @@ describe('GET /jobs/:jobID/lineage', function () {
       });
     });
 
-    describe('?expand=both with max smaller than the filtered set', function () {
-      hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { expand: 'both', max: 1 } });
-      it('returns 413', function () {
-        expect(this.res.statusCode).to.equal(413);
+    describe('?perPage above the cap', function () {
+      hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { perPage: 99999 } });
+      it('returns 400', function () {
+        expect(this.res.statusCode).to.equal(400);
       });
     });
   });
