@@ -28,15 +28,16 @@ access token may view.
 | Param | Values | Effect |
 |-------|--------|--------|
 | `step` | integer | Limit to one workflow step (filters work items by `workflowStepIndex`). |
-| `status` | `ready` \| `running` \| `successful` \| `failed` \| `canceled` | Limit to work items in a single status. |
+| `status` | one of the `WorkItemStatus` values | Limit to work items in a single status. |
 | `workItem` | integer | Limit to a single work item by id. |
-| `expand` | `inputs` \| `outputs` \| `both` | Read the relevant STAC catalogs from S3 and inline the resolved data hrefs as `files[]` on each work item. Applies only to the filtered set. |
-| `max` | integer (default 500) | Maximum number of work items expanded. If the filtered-and-expanded set exceeds this, respond with `413 Payload Too Large` and a message pointing the caller at the filter params. |
+| `expand` | `inputs` \| `outputs` \| `both` | Read the relevant STAC catalogs from S3 and resolve the data hrefs into the `files[]` array on each work item in the current page. Without `expand`, `files` is always present but set to `null` so its existence is discoverable from the default response. |
+| `page` | integer (default 1) | Page number for work items. |
+| `perPage` | integer (default 100, max 1000) | Page size for work items. |
 
-The cap exists as a safety belt. From production data, 99.7% of jobs have ≤10
-work items and the largest observed job has ~500. The default of 500
-accommodates every job seen so far while protecting against a future job that
-scrolls hundreds of thousands of granules.
+All filters are pushed into the SQL `WHERE` clause via the existing
+`queryAll` work-item helper, so a job with a million work items never
+round-trips a million rows. Pagination metadata is included in the
+response and is the bound on `?expand=` cost.
 
 ## Response shape
 
@@ -60,6 +61,25 @@ scrolls hundreds of thousands of granules.
     "truncated": false
   },
 
+  "operation": {
+    "sources": [ /* collections, variables, granules */ ],
+    "format": { /* mime, srs, scaleExtent, ... */ },
+    "subset": { /* bbox, temporal, dimensions, geojson, ... */ },
+    "extendDimensions": [],
+    "temporal": { "start": "...", "end": "..." },
+    "concatenate": false,
+    "average": null,
+    "pixelSubset": false,
+    "extraArgs": { /* service-specific config */ }
+  },
+
+  "pagination": {
+    "currentPage": 1,
+    "perPage": 100,
+    "total": 5,
+    "lastPage": 1
+  },
+
   "steps": [
     {
       "stepIndex": 1,
@@ -68,7 +88,6 @@ scrolls hundreds of thousands of granules.
       "hasAggregatedOutput": false,
       "isComplete": true,
       "workItemCount": 1,
-      "operation": { /* DataOperation with `accessToken` removed */ },
 
       "cmr": {
         "endpoint": "https://cmr.earthdata.nasa.gov",
@@ -92,7 +111,8 @@ scrolls hundreds of thousands of granules.
           "messageCategory": null,
           "input": null,
           "output": {
-            "catalog": "s3://artifacts/<jobID>/9491393/outputs/catalog.json"
+            "catalog": "s3://artifacts/<jobID>/9491393/outputs/catalog.json",
+            "files": null
           },
           "logs": "s3://artifacts/<jobID>/9491393/logs.json"
         }
@@ -106,7 +126,6 @@ scrolls hundreds of thousands of granules.
       "hasAggregatedOutput": false,
       "isComplete": false,
       "workItemCount": 1,
-      "operation": { /* DataOperation with `accessToken` removed */ },
 
       "workItems": [
         {
@@ -115,8 +134,8 @@ scrolls hundreds of thousands of granules.
           "retryCount": 0,
           "startedAt": "2026-05-12T08:43:12.000Z",
           "duration": 1234,
-          "input":  { "catalog": "s3://artifacts/<jobID>/9491393/outputs/catalog.json" },
-          "output": { "catalog": "s3://artifacts/<jobID>/9491415/outputs/catalog.json" },
+          "input":  { "catalog": "s3://artifacts/<jobID>/9491393/outputs/catalog.json", "files": null },
+          "output": { "catalog": "s3://artifacts/<jobID>/9491415/outputs/catalog.json", "files": null },
           "logs":   "s3://artifacts/<jobID>/9491415/logs.json"
         }
       ]
@@ -154,9 +173,10 @@ the lineage endpoint reports.
 | Job-level fields | `Job.byJobID` (`services/harmony/app/models/job.ts`) |
 | `originalRequest.url` | `jobs.request` column, stored at job creation; max 4096 chars. The `truncated` flag is set when `length === 4096`. |
 | `originalRequest.method`/`body` | Not stored today; `body` is always `null` and `bodyNote` explains. Becomes populated by the Option B follow-up below. |
-| Steps | `getWorkflowStepsByJobId` (`workflow-steps.ts:182`) — already includes the `operation` JSON string per step |
-| `operation` | `JSON.parse(step.operation)` with the `accessToken` key removed before serialization. Matches `services/harmony/app/util/log-redactor.ts` precedent. |
-| Work items | `getWorkItemsByJobId` (`work-item.ts:484`), filtered in-memory by `step`/`status`/`workItem` query params |
+| Steps | `getWorkflowStepsByJobId` (`workflow-steps.ts:182`) — includes the `operation` JSON string per step (not exposed per-step; see `operation` row below). |
+| `operation` | One canonical block at the response root, derived from step 1's stored `workflow_steps.operation` JSON. Projected to an allow-list: `sources`, `format`, `subset`, `extendDimensions`, `temporal`, `concatenate`, `average`, `pixelSubset`, `extraArgs`. Internal fields (`accessToken`, `callback`, `stagingLocation`, `user`, `client`, `version`, `requestId`, `isSynchronous`, `$schema`) are dropped. The operation is largely identical across steps, so we surface it once instead of duplicating per step. |
+| Work items | `queryAll` (`work-item.ts:417`) with a `WorkItemQuery.where` clause containing `jobID` + any of `workflowStepIndex`/`status`/`id`. Filters run in SQL; results paginated with `isLengthAware` so total counts are accurate. |
+| `pagination` | The `ILengthAwarePagination` object returned by `queryAll` (knex-paginate). |
 | `input.catalog` | `work_items.stacCatalogLocation` (null for the first step / query-cmr) |
 | `output.catalog` | Deterministic: `getStacLocation(workItem)` in `work-item-interface.ts:118` — `s3://{artifactBucket}/{jobID}/{wiId}/outputs/catalog.json` |
 | `logs` | Deterministic: `getItemLogsLocation(workItem)` in `work-item-interface.ts:128` |
@@ -166,10 +186,13 @@ the lineage endpoint reports.
 
 ## Redactions
 
-`DataOperation.accessToken` (encrypted EDL token, `data-operation.ts:886`) is
-the only field in the operation JSON that is sensitive. It is stripped
-before the response is built. Harmony already redacts this field in logs
-(`log-redactor.ts:27-38`) and we follow that precedent.
+The `operation` block is built by allow-list — only `sources`, `format`,
+`subset`, `extendDimensions`, `temporal`, `concatenate`, `average`,
+`pixelSubset`, and `extraArgs` are forwarded. Everything else, including
+the encrypted `accessToken` (`data-operation.ts:886`) and internal
+plumbing (`callback`, `stagingLocation`, `requestId`, etc.), is dropped.
+Allow-listing also means newly added operation fields stay private by
+default unless deliberately added to the public set.
 
 ## Known limitations
 
@@ -205,12 +228,14 @@ These are intentional gaps in v1. Each is surfaced honestly in the response
 ## Cost
 
 Default response (no `expand`): one DB read for the job, one for the
-workflow steps, one for the work items. Plus one S3 GET per query-cmr work
-item for the CMR `serializedQuery` (typically 1 per job).
+workflow steps, one paginated SQL query for the work items (bounded by
+`perPage`, default 100). Plus one S3 GET per query-cmr work item on the
+current page for the CMR `serializedQuery` (typically 1 per job).
 
-With `?expand=`: an additional `1 + N` S3 GETs per expanded work item, where
-N is the number of STAC items in that work item's catalog. N is typically
-1–10. The `max` cap (default 500) bounds the worst case.
+With `?expand=`: an additional `1 + N` S3 GETs per work item *on the
+current page*, where N is the number of STAC items in that work item's
+catalog. N is typically 1–10. `perPage` (default 100, max 1000) bounds the
+worst case independently of total job size.
 
 ## Follow-up work (Option B): persist POST request bodies
 
