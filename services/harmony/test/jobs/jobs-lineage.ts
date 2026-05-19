@@ -127,14 +127,22 @@ describe('GET /jobs/:jobID/lineage', function () {
       expect(body.request.truncated).to.equal(false);
     });
 
-    it('includes both workflow steps with serviceID, stepIndex, and flags', function () {
+    it('includes both workflow steps with serviceID and stepIndex', function () {
       const body = JSON.parse(this.res.text);
       expect(body.steps).to.have.lengthOf(2);
       expect(body.steps[0].stepIndex).to.equal(1);
       expect(body.steps[0].serviceID).to.equal('harmonyservices/query-cmr:latest');
       expect(body.steps[1].stepIndex).to.equal(2);
       expect(body.steps[1].serviceID).to.equal('nasa/harmony-opendap-subsetter:1.2.4');
-      expect(body.steps[0]).to.include.keys('isBatched', 'hasAggregatedOutput', 'isComplete');
+    });
+
+    it('does not expose step-level state flags on the response', function () {
+      const body = JSON.parse(this.res.text);
+      for (const step of body.steps) {
+        expect(step).to.not.have.property('isBatched');
+        expect(step).to.not.have.property('hasAggregatedOutput');
+        expect(step).to.not.have.property('isComplete');
+      }
     });
 
     it('exposes one curated operation at the response root, not per step', function () {

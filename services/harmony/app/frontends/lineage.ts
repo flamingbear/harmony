@@ -64,9 +64,6 @@ interface LineageWorkItem {
 interface LineageStep {
   stepIndex: number;
   serviceID: string;
-  isBatched: boolean;
-  hasAggregatedOutput: boolean;
-  isComplete: boolean;
   workItemCount: number;
   cmr?: {
     endpoint: string;
@@ -273,9 +270,6 @@ async function buildSteps(
     const lineageStep: LineageStep = {
       stepIndex: step.stepIndex,
       serviceID: step.serviceID,
-      isBatched: step.isBatched,
-      hasAggregatedOutput: step.hasAggregatedOutput,
-      isComplete: step.is_complete,
       workItemCount: step.workItemCount,
       workItems: stepWorkItems.map((wi) => buildWorkItem(wi, resolved)),
     };

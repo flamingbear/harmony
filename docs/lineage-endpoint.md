@@ -76,9 +76,6 @@ on expanding file location and fetching work-items cost.
     {
       "stepIndex": 1,
       "serviceID": "harmonyservices/query-cmr:latest",
-      "isBatched": false,
-      "hasAggregatedOutput": false,
-      "isComplete": true,
       "workItemCount": 1,
 
       "cmr": {
@@ -113,9 +110,6 @@ on expanding file location and fetching work-items cost.
     {
       "stepIndex": 2,
       "serviceID": "nasa/harmony-opendap-subsetter:1.2.4",
-      "isBatched": false,
-      "hasAggregatedOutput": false,
-      "isComplete": false,
       "workItemCount": 1,
 
       "workItems": [
@@ -220,11 +214,13 @@ These are intentional gaps in v1. Each is surfaced honestly in the response
    same `work_items` row across retries; only the latest attempt's
    `startedAt`/`duration`/`message` are visible. Lineage reports the
    `retryCount` so callers know retries happened.
-6. **Batched / aggregated steps are not 1:1 input→output.** When `isBatched`
-   or `hasAggregatedOutput` is true, the aggregated work item's input catalog
-   indexes many upstream catalogs. v1 reports the flags and lets callers
-   handle the fan-in/fan-out themselves; we don't enumerate per-batch
-   membership.
+6. **Batched / aggregated steps are not distinguishable from this endpoint.**
+   When a service step uses batching or output aggregation, the relationship
+   between input and output files is not 1:1 — a single work item may consume
+   many upstream catalogs. The response does not expose this; callers cannot
+   tell from the lineage endpoint whether a given step batches or aggregates.
+   If needed, query `workflow_steps` directly for the `isBatched` /
+   `hasAggregatedOutput` flags.
 
 ## Cost
 
