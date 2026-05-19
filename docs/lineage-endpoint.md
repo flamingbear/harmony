@@ -30,14 +30,14 @@ access token may view.
 | `step` | integer | Limit to one workflow step (filters work items by `workflowStepIndex`). |
 | `status` | one of the `WorkItemStatus` values | Limit to work items in a single status. |
 | `workItem` | integer | Limit to a single work item by id. |
-| (none — see `files` contract below) | — | The endpoint always resolves STAC catalogs into `files[]` for completed work items. There is no opt-in flag; intermediate data files are the primary value of the endpoint. |
 | `page` | integer (default 1) | Page number for work items. |
 | `perPage` | integer (default 100, max 1000) | Page size for work items. |
 
-All filters are pushed into the SQL `WHERE` clause via the existing
-`queryAll` work-item helper, so a job with a million work items never
-round-trips a million rows. Pagination metadata is included in the
-response and is the bound on `?expand=` cost.
+All filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
+work-item helper, so a job with a million work items never round-trips a
+million rows. Pagination metadata is included in the response and is the bound
+on expanding file location and fetching work-items cost.
+
 
 ## Response shape
 
@@ -47,8 +47,7 @@ response and is the bound on `?expand=` cost.
   "status": "failed",
   "progress": 80,
   "message": "...",
-  "username": "ahowe42",
-  "request": "https://harmony.../ogc-api-coverages/...?...",
+  "username": "esdis username",
   "numInputGranules": 5,
   "createdAt": "2026-05-12T08:42:04.123Z",
   "updatedAt": "2026-05-12T08:46:37.000Z",
@@ -57,7 +56,7 @@ response and is the bound on `?expand=` cost.
     "url": "https://harmony.../ogc-api-coverages/...?...",
     "method": "GET",
     "body": null,
-    "bodyNote": "POST bodies are not persisted by Harmony today. See follow-up: write request.json to artifact bucket.",
+    "bodyNote": "POST bodies are not persisted by Harmony today.",
     "truncated": false
   },
 
@@ -87,7 +86,6 @@ response and is the bound on `?expand=` cost.
         "calls": [
           {
             "workItemId": 9491393,
-            "sessionKey": "<scrollID>",
             "params": { /* contents of s3://{stagingBucket}/SearchParams/<scrollID>/serializedQuery */ }
           }
         ]

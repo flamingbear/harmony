@@ -70,7 +70,7 @@ interface LineageStep {
   workItemCount: number;
   cmr?: {
     endpoint: string;
-    calls: { workItemId: number; sessionKey: string; params: unknown }[];
+    calls: { workItemId: number; params: unknown }[];
   };
   workItems: LineageWorkItem[];
 }
@@ -232,14 +232,14 @@ function buildWorkItem(
  */
 async function buildCmrCalls(
   workItems: WorkItem[],
-): Promise<{ workItemId: number; sessionKey: string; params: unknown }[]> {
+): Promise<{ workItemId: number; params: unknown }[]> {
   const store = defaultObjectStore();
-  const calls: { workItemId: number; sessionKey: string; params: unknown }[] = [];
+  const calls: { workItemId: number; params: unknown }[] = [];
   for (const wi of workItems) {
     if (!wi.scrollID) continue;
     try {
       const params = await store.getObjectJson(s3UrlForStoredQueryParams(wi.scrollID));
-      calls.push({ workItemId: wi.id, sessionKey: wi.scrollID, params });
+      calls.push({ workItemId: wi.id, params });
     } catch {
       // The SearchParams object may have been evicted or never written; skip.
     }
