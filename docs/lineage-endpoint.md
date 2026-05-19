@@ -94,11 +94,8 @@ on expanding file location and fetching work-items cost.
           "status": "successful",
           "retryCount": 0,
           "startedAt": "2026-05-12T08:42:05.000Z",
-          "input": null,
-          "output": {
-            "catalog": "s3://artifacts/<jobID>/9491393/outputs/catalog.json",
-            "files": ["s3://staging-bucket/.../granule_xyz.nc4"]
-          },
+          "inputFiles": null,
+          "outputFiles": ["s3://staging-bucket/.../granule_xyz.nc4"],
           "logs": "s3://artifacts/<jobID>/9491393/logs.json"
         }
       ]
@@ -115,9 +112,9 @@ on expanding file location and fetching work-items cost.
           "status": "failed",
           "retryCount": 0,
           "startedAt": "2026-05-12T08:43:12.000Z",
-          "input":  { "catalog": "s3://artifacts/<jobID>/9491393/outputs/catalog.json", "files": ["s3://staging-bucket/.../granule_xyz.nc4"] },
-          "output": { "catalog": "s3://artifacts/<jobID>/9491415/outputs/catalog.json", "files": [] },
-          "logs":   "s3://artifacts/<jobID>/9491415/logs.json"
+          "inputFiles":  ["s3://staging-bucket/.../granule_xyz.nc4"],
+          "outputFiles": [],
+          "logs":        "s3://artifacts/<jobID>/9491415/logs.json"
         }
       ]
     }
@@ -132,22 +129,23 @@ on expanding file location and fetching work-items cost.
 }
 ```
 
-### The `files` contract
+### The `inputFiles` / `outputFiles` contract
 
-Every `input` and `output` has both a `catalog` URL and a `files` value:
+Each work item carries two flat fields, `inputFiles` and `outputFiles`,
+each one of three values:
 
-| `files` value | What it means |
+| Value | What it means |
 |---|---|
-| `null` | The owning work item has not completed yet. The `catalog` URL is the deterministic S3 path the output *will* land at. |
-| `[]` | The work item completed but the catalog was missing, unreadable, or had no STAC items with `role: 'data'`. Common case: a failed WI whose service didn't write its output catalog. |
+| `null` | Nothing to show. For `outputFiles`: the work item has not completed yet (its output catalog doesn't exist). For `inputFiles`: the work item has not completed yet, **or** the work item has no STAC input by design (e.g. step 1 query-cmr WIs). Use the WI's `status` field and the step's `stepIndex` to disambiguate. |
+| `[]` | The work item completed but the relevant catalog was missing, unreadable, or had no STAC items with `role: 'data'`. Common case: a failed WI whose service didn't write its output catalog. |
 | `["s3://..."]` | The catalog was read; these are the data hrefs (verbatim — Harmony does not rewrite `s3://` vs `https://`). |
 
 The handler resolves catalogs only for WIs in `COMPLETED_WORK_ITEM_STATUSES`
 (`successful`, `failed`, `canceled`, `warning`). Incomplete WIs (`ready`,
 `queued`, `running`) never trigger S3 reads, so a running job's lineage
-returns quickly with `files: null` everywhere.
+returns quickly with both `inputFiles` and `outputFiles` set to `null`.
 
-`files[]` comes from walking the STAC catalog: `catalog.json` (which lists
+The URL set comes from walking the STAC catalog: `catalog.json` (which lists
 `./catalogN.json` item links), then each item file's `assets[*].href` where
 the asset has `role: 'data'` (or asset name `data`). This is the same logic
 that `services/harmony/app/util/stac.ts` already uses for batch generation
@@ -168,12 +166,10 @@ the lineage endpoint reports.
 | `operation` | One canonical block at the response root, derived from step 1's stored `workflow_steps.operation` JSON. Projected to an allow-list: `sources`, `format`, `subset`, `extendDimensions`, `temporal`, `concatenate`, `average`, `pixelSubset`, `extraArgs`. Internal fields (`accessToken`, `callback`, `stagingLocation`, `user`, `client`, `version`, `requestId`, `isSynchronous`, `$schema`) are dropped. The operation is largely identical across steps, so we surface it once instead of duplicating per step. |
 | Work items | `queryAll` (`work-item.ts:417`) with a `WorkItemQuery.where` clause containing `jobID` + any of `workflowStepIndex`/`status`/`id`. Filters run in SQL; results paginated with `isLengthAware` so total counts are accurate. |
 | `pagination` | The `ILengthAwarePagination` object returned by `queryAll` (knex-paginate). |
-| `input.catalog` | `work_items.stacCatalogLocation` (null for the first step / query-cmr) |
-| `output.catalog` | Deterministic: `getStacLocation(workItem)` in `work-item-interface.ts:118` — `s3://{artifactBucket}/{jobID}/{wiId}/outputs/catalog.json` |
 | `logs` | Deterministic: `getItemLogsLocation(workItem)` in `work-item-interface.ts:128` |
 | `cmr.params` | For each query-cmr work item, one S3 GET of `s3UrlForStoredQueryParams(scrollID)` (`cmr.ts:1315`) |
 | `cmr.endpoint` | `env.cmrEndpoint` |
-| `files[]` for completed WIs | `readCatalogItems(catalogUrl)` then `getCatalogLinks(items)` in `services/harmony/app/util/stac.ts`. The handler collects the unique set of catalog URLs across all *completed* WIs on the current page and resolves them with `Promise.all`, so duplicated catalogs (step N output ≡ step N+1 input) cost a single S3 GET and incomplete WIs cost zero. |
+| `inputFiles` / `outputFiles` for completed WIs | `readCatalogItems(catalogUrl)` then `getCatalogLinks(items)` in `services/harmony/app/util/stac.ts`. The handler collects the unique set of catalog URLs across all *completed* WIs on the current page (each WI's `stacCatalogLocation` for inputs, plus `getStacLocation(workItem)` for outputs) and resolves them with `Promise.all`, so duplicated catalogs (step N output ≡ step N+1 input) cost a single S3 GET and incomplete WIs cost zero. |
 
 ## Redactions
 
@@ -197,10 +193,10 @@ These are intentional gaps in v1. Each is surfaced honestly in the response
    varchar; `Job.save()` truncates beyond 4096. URLs longer than that are
    already lost by the time the lineage endpoint runs. The `truncated` flag
    reports when this happened.
-3. **Failed work items may have no output catalog.** When a service fails
-   before writing its STAC output, `output.catalog` still points to the
-   deterministic S3 path, but a GET will 404. `expand=outputs` will either
-   skip the entry or return an empty `files[]`.
+3. **Failed work items often have no output catalog.** When a service fails
+   before writing its STAC output, the deterministic S3 catalog path will
+   return 404. The handler swallows that and reports `outputFiles: []` for
+   the failed WI.
 4. **Per-work-item error messages are not in the response.** The `work_items`
    table persists `message_category` but not the `message` text itself — the
    message is only set transiently during update processing

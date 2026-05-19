@@ -39,22 +39,19 @@ interface LineageQuery {
   perPage: number;
 }
 
-interface ResolvedCatalog {
-  catalog: string;
-  // null  = the owning WI hasn't completed yet (no catalog to read).
-  // []    = the WI completed but the catalog had no data assets (e.g. failed
-  //         WI whose output catalog is missing, or a catalog with no items).
-  // [...] = resolved data hrefs from the STAC catalog.
-  files: string[] | null;
-}
-
+// inputFiles / outputFiles three-state contract:
+//   null  = nothing to show — either the WI hasn't completed yet, or (inputFiles
+//           only) the WI never had a STAC input by design (e.g. query-cmr step).
+//   []    = the WI completed but the catalog was missing or had no data assets
+//           (e.g. failed WI whose service didn't write its output catalog).
+//   [...] = resolved data hrefs from the STAC catalog.
 interface LineageWorkItem {
   id: number;
   status: WorkItemStatus;
   retryCount: number;
   startedAt: Date | null;
-  input: ResolvedCatalog | null;
-  output: ResolvedCatalog;
+  inputFiles: string[] | null;
+  outputFiles: string[] | null;
   logs: string;
 }
 
@@ -185,33 +182,26 @@ async function resolveAllCatalogs(
 }
 
 /**
- * Build the work item portion of the response. files[] is populated from
- * the precomputed `resolved` map; URLs missing from the map (because the
- * WI was incomplete when resolveAllCatalogs ran) surface as `files: null`.
+ * Build the work item portion of the response. inputFiles / outputFiles are
+ * populated from the precomputed `resolved` map; URLs missing from the map
+ * (because the WI was incomplete when resolveAllCatalogs ran) surface as
+ * `null`. WIs that never have a STAC input (e.g. query-cmr step 1) always
+ * report `inputFiles: null`.
  */
 function buildWorkItem(
   wi: WorkItem,
   resolved: Map<string, string[]>,
 ): LineageWorkItem {
   const outputCatalog = getStacLocation({ id: wi.id, jobID: wi.jobID }, 'catalog.json');
-  const input: ResolvedCatalog | null = wi.stacCatalogLocation
-    ? {
-      catalog: wi.stacCatalogLocation,
-      files: resolved.get(wi.stacCatalogLocation) ?? null,
-    }
-    : null;
-  const output: ResolvedCatalog = {
-    catalog: outputCatalog,
-    files: resolved.get(outputCatalog) ?? null,
-  };
-
   return {
     id: wi.id,
     status: wi.status,
     retryCount: wi.retryCount,
     startedAt: wi.startedAt ?? null,
-    input,
-    output,
+    inputFiles: wi.stacCatalogLocation
+      ? (resolved.get(wi.stacCatalogLocation) ?? null)
+      : null,
+    outputFiles: resolved.get(outputCatalog) ?? null,
     logs: getItemLogsLocation({ id: wi.id, jobID: wi.jobID }),
   };
 }

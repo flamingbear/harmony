@@ -167,14 +167,22 @@ describe('GET /jobs/:jobID/lineage', function () {
       }
     });
 
-    it('includes work items with deterministic output catalog and logs S3 paths', function () {
+    it('includes work items with a deterministic logs S3 path', function () {
+      const body = JSON.parse(this.res.text);
+      const wi1 = body.steps[0].workItems[0];
+      expect(wi1.logs).to.match(new RegExp(`^s3://.*/${ownerJob.jobID}/${wi1.id}/logs\\.json$`));
+    });
+
+    it('exposes flat inputFiles / outputFiles fields (no nested catalog wrapper)', function () {
       const body = JSON.parse(this.res.text);
       const wi1 = body.steps[0].workItems[0];
       const wi2 = body.steps[1].workItems[0];
-      expect(wi1.output.catalog).to.match(new RegExp(`^s3://.*/${ownerJob.jobID}/${wi1.id}/outputs/catalog\\.json$`));
-      expect(wi1.logs).to.match(new RegExp(`^s3://.*/${ownerJob.jobID}/${wi1.id}/logs\\.json$`));
-      expect(wi2.input.catalog).to.equal(`s3://artifacts/${ownerJob.jobID}/1/outputs/catalog.json`);
-      expect(wi2.status).to.equal('failed');
+      expect(wi1).to.not.have.property('input');
+      expect(wi1).to.not.have.property('output');
+      expect(wi1).to.have.property('inputFiles');
+      expect(wi1).to.have.property('outputFiles');
+      expect(wi2).to.have.property('inputFiles');
+      expect(wi2).to.have.property('outputFiles');
     });
 
     it('always resolves files for completed work items', function () {
@@ -184,11 +192,12 @@ describe('GET /jobs/:jobID/lineage', function () {
       // Both fixtures are in completed states (SUCCESSFUL / FAILED). Their
       // catalogs do not exist in test S3, so resolveDataHrefs catches the
       // error and returns []. The contract is: completed WI => array (not
-      // null), incomplete WI => null. The empty array confirms resolution
-      // was attempted.
-      expect(wi1.output.files).to.be.an('array');
-      expect(wi2.input.files).to.be.an('array');
-      expect(wi2.output.files).to.be.an('array');
+      // null), incomplete WI => null. wi1 is query-cmr so inputFiles is
+      // intentionally null (no STAC input by design).
+      expect(wi1.inputFiles).to.equal(null);
+      expect(wi1.outputFiles).to.be.an('array');
+      expect(wi2.inputFiles).to.be.an('array');
+      expect(wi2.outputFiles).to.be.an('array');
     });
 
     it('attaches a cmr block (with endpoint) to the query-cmr step', function () {
@@ -246,12 +255,13 @@ describe('GET /jobs/:jobID/lineage', function () {
 
   describe('For a job whose work item is still incomplete', function () {
     hookJobLineage({ jobID: runningJob.jobID, username: 'joe' });
-    it('leaves files as null and does not attempt resolution', function () {
+    it('leaves outputFiles as null and does not attempt resolution', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
       expect(wi.status).to.equal('ready');
-      expect(wi.output.files).to.equal(null);
+      expect(wi.outputFiles).to.equal(null);
+      expect(wi.inputFiles).to.equal(null);
     });
   });
 
