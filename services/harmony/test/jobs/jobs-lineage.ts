@@ -40,11 +40,14 @@ describe('GET /jobs/:jobID/lineage', function () {
 
   before(async function () {
     await ownerJob.save(this.trx);
-    // Step 1: query-cmr with a single successful work item (scrollID indicates query-cmr)
+    // Step 1: query-cmr with a single successful work item (scrollID indicates
+    // query-cmr). The stored serviceID intentionally carries an ECR prefix so
+    // tests verify that sanitizeImage runs on the response (the assertion
+    // below expects the stripped form "harmonyservices/query-cmr:latest").
     const step1 = buildWorkflowStep({
       jobID: ownerJob.jobID,
       stepIndex: 1,
-      serviceID: 'harmonyservices/query-cmr:latest',
+      serviceID: '123456789012.dkr.ecr.us-west-2.amazonaws.com/harmonyservices/query-cmr:latest',
       workItemCount: 1,
       operation: validOperation,
     });

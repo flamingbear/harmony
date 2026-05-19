@@ -7,6 +7,8 @@ import {
   COMPLETED_WORK_ITEM_STATUSES, getStacLocation, WorkItemQuery, WorkItemStatus,
 } from '../models/work-item-interface';
 import WorkflowStep, { getWorkflowStepsByJobId } from '../models/workflow-steps';
+import { sanitizeImage } from '@harmony/util/string';
+
 import { createPublicPermalink } from './service-results';
 import { s3UrlForStoredQueryParams } from '../util/cmr';
 import db from '../util/db';
@@ -292,7 +294,10 @@ async function buildSteps(
 
     const lineageStep: LineageStep = {
       stepIndex: step.stepIndex,
-      serviceID: step.serviceID,
+      // Strip AWS ECR account and earthdata.nasa.gov host prefixes from the
+      // service image name (e.g. "123.dkr.ecr.us-west-2.amazonaws.com/foo:1.0"
+      // → "foo:1.0") so internal registry info isn't exposed.
+      serviceID: sanitizeImage(step.serviceID),
       workItemCount: step.workItemCount,
       workItems: stepWorkItems.map((wi) => buildWorkItem(wi, resolved)),
     };
