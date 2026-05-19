@@ -53,9 +53,6 @@ interface LineageWorkItem {
   status: WorkItemStatus;
   retryCount: number;
   startedAt: Date | null;
-  duration: number;
-  totalItemsSize: number | null;
-  messageCategory: string | null;
   input: ResolvedCatalog | null;
   output: ResolvedCatalog;
   logs: string;
@@ -213,9 +210,6 @@ function buildWorkItem(
     status: wi.status,
     retryCount: wi.retryCount,
     startedAt: wi.startedAt ?? null,
-    duration: wi.duration,
-    totalItemsSize: wi.totalItemsSize ?? null,
-    messageCategory: wi.message_category ?? null,
     input,
     output,
     logs: getItemLogsLocation({ id: wi.id, jobID: wi.jobID }),

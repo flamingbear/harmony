@@ -94,9 +94,6 @@ on expanding file location and fetching work-items cost.
           "status": "successful",
           "retryCount": 0,
           "startedAt": "2026-05-12T08:42:05.000Z",
-          "duration": 1234,
-          "totalItemsSize": 1024,
-          "messageCategory": null,
           "input": null,
           "output": {
             "catalog": "s3://artifacts/<jobID>/9491393/outputs/catalog.json",
@@ -118,7 +115,6 @@ on expanding file location and fetching work-items cost.
           "status": "failed",
           "retryCount": 0,
           "startedAt": "2026-05-12T08:43:12.000Z",
-          "duration": 1234,
           "input":  { "catalog": "s3://artifacts/<jobID>/9491393/outputs/catalog.json", "files": ["s3://staging-bucket/.../granule_xyz.nc4"] },
           "output": { "catalog": "s3://artifacts/<jobID>/9491415/outputs/catalog.json", "files": [] },
           "logs":   "s3://artifacts/<jobID>/9491415/logs.json"
@@ -209,7 +205,7 @@ These are intentional gaps in v1. Each is surfaced honestly in the response
    table persists `message_category` but not the `message` text itself — the
    message is only set transiently during update processing
    (`work-item-updates.ts:1068`) and routed to `job_messages` and logs.
-   Use `logs` (S3 path) or `messageCategory` to investigate failures.
+   Use the `logs` S3 path on each work item to investigate failures.
 5. **Retried work items lose their prior attempts.** Harmony updates the
    same `work_items` row across retries; only the latest attempt's
    `startedAt`/`duration`/`message` are visible. Lineage reports the
