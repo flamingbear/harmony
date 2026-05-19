@@ -30,7 +30,7 @@ access token may view.
 | `step` | integer | Limit to one workflow step (filters work items by `workflowStepIndex`). |
 | `status` | one of the `WorkItemStatus` values | Limit to work items in a single status. |
 | `workItem` | integer | Limit to a single work item by id. |
-| `linktype` | `s3` or anything else (typically omitted) | Mirrors the `/jobs/:jobID` parameter. When `s3`, raw `s3://` URLs are preserved in `inputFiles` / `outputFiles`. Otherwise (default), URLs are rewritten to `<frontendRoot>/service-results/...` permalinks that 302-redirect to a presigned URL on follow. |
+| `linktype` | `s3`, `http`, `https`, or absent | Controls how `inputFiles` / `outputFiles` URLs are rendered. See the **`linktype`** section below for the full table. |
 | `page` | integer (default 1) | Page number for work items. |
 | `perPage` | integer (default 100, max 1000) | Page size for work items. |
 
@@ -38,6 +38,36 @@ All filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
 work-item helper, so a job with a million work items never round-trips a
 million rows. Pagination metadata is included in the response and is the bound
 on expanding file location and fetching work-items cost.
+
+### `linktype`
+
+`linktype` controls how the URLs in `inputFiles` and `outputFiles` are
+rendered. The same parameter and meaning exist on `/jobs/:jobID`; this
+endpoint forwards it through `createPublicPermalink` so both endpoints
+shape URLs the same way.
+
+Three transforms are applied per asset href, depending on the href's
+protocol and `linktype`:
+
+| Original href | `?linktype=s3` | otherwise (default) |
+|---|---|---|
+| `s3://bucket/public/path/file.nc4` | `s3://bucket/public/path/file.nc4` (verbatim) | `https://<frontendRoot>/service-results/bucket/public/path/file.nc4` |
+| `https://...` or `s?ftp://...` | passes through unchanged | passes through unchanged |
+| `s3://bucket/SOMETHING-NOT-public/...` | replaced with `"<private file location>"` | replaced with `"<private file location>"` |
+| Anything else (unrecognized protocol) | replaced with `"<private file location>"` | replaced with `"<private file location>"` |
+
+When the default applies, the resulting `/service-results/...` URL is a
+stable Harmony endpoint. Following it returns a 302 to a presigned S3 URL
+generated at follow-time, so the response itself doesn't carry expiring
+credentials.
+
+Use `?linktype=s3` when you want raw S3 paths to script against (e.g. pipe
+into `aws s3 cp`). Use the default when you want a URL you can curl/share.
+
+The `"<private file location>"` sentinel preserves cardinality: a work item
+that produced three files but two are unsignable shows three array entries
+with two sentinels, so the caller can see something exists at that position
+even when they're not allowed to fetch it.
 
 
 ## Response shape
@@ -96,8 +126,7 @@ on expanding file location and fetching work-items cost.
           "retryCount": 0,
           "startedAt": "2026-05-12T08:42:05.000Z",
           "inputFiles": null,
-          "outputFiles": ["https://harmony.example/service-results/staging-bucket/public/.../granule_xyz.nc4"],
-          "logs": "s3://artifacts/<jobID>/9491393/logs.json"
+          "outputFiles": ["https://harmony.example/service-results/staging-bucket/public/.../granule_xyz.nc4"]
         }
       ]
     },
@@ -114,8 +143,7 @@ on expanding file location and fetching work-items cost.
           "retryCount": 0,
           "startedAt": "2026-05-12T08:43:12.000Z",
           "inputFiles":  ["https://harmony.example/service-results/staging-bucket/public/.../granule_xyz.nc4"],
-          "outputFiles": [],
-          "logs":        "s3://artifacts/<jobID>/9491415/logs.json"
+          "outputFiles": []
         }
       ]
     }
@@ -138,8 +166,8 @@ each one of three values:
 | Value | What it means |
 |---|---|
 | `null` | Nothing to show. For `outputFiles`: the work item has not completed yet (its output catalog doesn't exist). For `inputFiles`: the work item has not completed yet, **or** the work item has no STAC input by design (e.g. step 1 query-cmr WIs). Use the WI's `status` field and the step's `stepIndex` to disambiguate. |
-| `[]` | The work item completed but the relevant catalog was missing, unreadable, had no STAC items with `role: 'data'`, or every href was unsignable (e.g. an S3 URL outside `/public/`, which is dropped to prevent leaking internal locations). |
-| `["https://harmony.../service-results/..."]` | Resolved data hrefs, run through the same signing path `/jobs/:jobID` uses. By default `s3://bucket/public/...` is rewritten to a `<frontendRoot>/service-results/bucket/...` permalink that 302-redirects to a presigned URL on follow; `https://...` and `s?ftp://...` URLs pass through unchanged. Pass `?linktype=s3` to keep raw `s3://` URLs instead. |
+| `[]` | The work item completed but the relevant catalog was missing, unreadable, or had no STAC items with `role: 'data'`. |
+| `["https://harmony.../service-results/...", "<private file location>", ...]` | Resolved data hrefs, run through the same signing path `/jobs/:jobID` uses. By default `s3://bucket/public/...` is rewritten to a `<frontendRoot>/service-results/bucket/...` permalink that 302-redirects to a presigned URL on follow; `https://...` and `s?ftp://...` URLs pass through unchanged. Pass `?linktype=s3` to keep raw `s3://` URLs instead. Hrefs that can't be signed (e.g. internal S3 URLs outside `/public/`) appear as the literal sentinel `"<private file location>"` so the caller sees the cardinality of the file list, not just the accessible subset. |
 
 The handler resolves catalogs only for WIs in `COMPLETED_WORK_ITEM_STATUSES`
 (`successful`, `failed`, `canceled`, `warning`). Incomplete WIs (`ready`,
@@ -156,7 +184,9 @@ URLs are signed via the same `createPublicPermalink` path that `/jobs/:jobID`
 uses for `links` hrefs. By default, the lineage endpoint never exposes raw
 internal S3 locations to clients — `s3://bucket/public/...` becomes a
 `/service-results/...` permalink, `https://...` passes through unchanged,
-and anything else (e.g. an S3 URL outside `/public/`) is dropped. Pass
+and anything else (e.g. an S3 URL outside `/public/`) is replaced with the
+sentinel `"<private file location>"` so the caller still sees that a file
+exists at that position even though they're not allowed to fetch it. Pass
 `?linktype=s3` to opt out of permalinking for callers that script against
 raw S3.
 
@@ -171,10 +201,9 @@ raw S3.
 | `operation` | One canonical block at the response root, derived from step 1's stored `workflow_steps.operation` JSON. Projected to an allow-list: `sources`, `format`, `subset`, `extendDimensions`, `temporal`, `concatenate`, `average`, `pixelSubset`, `extraArgs`. Internal fields (`accessToken`, `callback`, `stagingLocation`, `user`, `client`, `version`, `requestId`, `isSynchronous`, `$schema`) are dropped. The operation is largely identical across steps, so we surface it once instead of duplicating per step. |
 | Work items | `queryAll` (`work-item.ts:417`) with a `WorkItemQuery.where` clause containing `jobID` + any of `workflowStepIndex`/`status`/`id`. Filters run in SQL; results paginated with `isLengthAware` so total counts are accurate. |
 | `pagination` | The `ILengthAwarePagination` object returned by `queryAll` (knex-paginate). |
-| `logs` | Deterministic: `getItemLogsLocation(workItem)` in `work-item-interface.ts:128` |
 | `cmr.params` | For each query-cmr work item, one S3 GET of `s3UrlForStoredQueryParams(scrollID)` (`cmr.ts:1315`) |
 | `cmr.endpoint` | `env.cmrEndpoint` |
-| `inputFiles` / `outputFiles` for completed WIs | `readCatalogItems(catalogUrl)` then `getCatalogLinks(items)` in `services/harmony/app/util/stac.ts`, then each href run through `createPublicPermalink` (`app/frontends/service-results.ts:35`) — the same signing path `/jobs/:jobID` uses. The handler collects the unique set of catalog URLs across all *completed* WIs on the current page (each WI's `stacCatalogLocation` for inputs, plus `getStacLocation(workItem)` for outputs) and resolves them with `Promise.all`, so duplicated catalogs (step N output ≡ step N+1 input) cost a single S3 GET and incomplete WIs cost zero. Hrefs that can't be signed (e.g. internal S3 URLs outside `/public/`) are silently dropped to avoid leaking internal locations. |
+| `inputFiles` / `outputFiles` for completed WIs | `readCatalogItems(catalogUrl)` then `getCatalogLinks(items)` in `services/harmony/app/util/stac.ts`, then each href run through `createPublicPermalink` (`app/frontends/service-results.ts:35`) — the same signing path `/jobs/:jobID` uses. The handler collects the unique set of catalog URLs across all *completed* WIs on the current page (each WI's `stacCatalogLocation` for inputs, plus `getStacLocation(workItem)` for outputs) and resolves them with `Promise.all`, so duplicated catalogs (step N output ≡ step N+1 input) cost a single S3 GET and incomplete WIs cost zero. Hrefs that can't be signed (e.g. internal S3 URLs outside `/public/`) are replaced with the sentinel `"<private file location>"` rather than dropped, preserving the cardinality of the list. |
 
 ## Redactions
 
@@ -202,11 +231,15 @@ These are intentional gaps in v1. Each is surfaced honestly in the response
    before writing its STAC output, the deterministic S3 catalog path will
    return 404. The handler swallows that and reports `outputFiles: []` for
    the failed WI.
-4. **Per-work-item error messages are not in the response.** The `work_items`
-   table persists `message_category` but not the `message` text itself — the
-   message is only set transiently during update processing
+4. **Per-work-item error messages and logs are not in the response.** The
+   `work_items` table persists `message_category` but not the `message` text
+   itself — the message is only set transiently during update processing
    (`work-item-updates.ts:1068`) and routed to `job_messages` and logs.
-   Use the `logs` S3 path on each work item to investigate failures.
+   Logs themselves are not exposed: the existing `/logs/:jobID/:id` endpoint
+   is admin-gated (`workflow-ui.ts:779`), and the artifact-bucket S3 path is
+   not under `/public/`, so signing it would always produce a `"<private file
+   location>"` sentinel. Admins debugging a WI can hit `/logs/:jobID/:id`
+   directly using the `id` surfaced on each work item in this response.
 5. **Retried work items lose their prior attempts.** Harmony updates the
    same `work_items` row across retries; only the latest attempt's
    `startedAt`/`duration`/`message` are visible. Lineage reports the

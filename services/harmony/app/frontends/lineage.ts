@@ -4,8 +4,7 @@ import HarmonyRequest from '../models/harmony-request';
 import { TEXT_LIMIT } from '../models/job';
 import WorkItem, { queryAll as queryWorkItems } from '../models/work-item';
 import {
-  COMPLETED_WORK_ITEM_STATUSES, getItemLogsLocation, getStacLocation,
-  WorkItemQuery, WorkItemStatus,
+  COMPLETED_WORK_ITEM_STATUSES, getStacLocation, WorkItemQuery, WorkItemStatus,
 } from '../models/work-item-interface';
 import WorkflowStep, { getWorkflowStepsByJobId } from '../models/workflow-steps';
 import { createPublicPermalink } from './service-results';
@@ -55,7 +54,6 @@ interface LineageWorkItem {
   startedAt: Date | null;
   inputFiles: string[] | null;
   outputFiles: string[] | null;
-  logs: string;
 }
 
 interface LineageStep {
@@ -165,21 +163,28 @@ async function resolveDataHrefs(catalogUrl: string): Promise<string[]> {
   }
 }
 
+// Placeholder used in inputFiles / outputFiles when a STAC asset href cannot
+// be turned into a public link (e.g. an S3 URL outside `/public/`). Preserves
+// the cardinality of the file list so the caller can see "there were N files,
+// M of them I'm not allowed to see" rather than silently dropping entries.
+// The angle brackets make this unambiguously not a URL.
+const PRIVATE_FILE_PLACEHOLDER = '<private file location>';
+
 /**
  * Convert a raw STAC asset href into the public-facing form Harmony uses
  * for job links. S3 URLs under `/public/` become `<root>/service-results/...`
  * permalinks (which pre-sign on follow); HTTPS URLs pass through; anything
- * else (e.g. an S3 URL outside `/public/`) is dropped to prevent leaking
- * internal locations. `linkType === 's3'` keeps raw s3:// URLs for callers
- * scripting against S3 directly.
+ * else (e.g. an S3 URL outside `/public/`) becomes the PRIVATE_FILE_PLACEHOLDER
+ * sentinel. `linkType === 's3'` keeps raw s3:// URLs for callers scripting
+ * against S3 directly.
  */
 function safePublicLink(
   href: string, frontendRoot: string, linkType: string | undefined,
-): string | null {
+): string {
   try {
     return createPublicPermalink(href, frontendRoot, undefined, linkType);
   } catch {
-    return null;
+    return PRIVATE_FILE_PLACEHOLDER;
   }
 }
 
@@ -209,9 +214,7 @@ async function resolveAllCatalogs(
   const entries = await Promise.all(
     Array.from(urls).map(async (url) => {
       const rawHrefs = await resolveDataHrefs(url);
-      const publicHrefs = rawHrefs
-        .map((h) => safePublicLink(h, frontendRoot, linkType))
-        .filter((h): h is string => h !== null);
+      const publicHrefs = rawHrefs.map((h) => safePublicLink(h, frontendRoot, linkType));
       return [url, publicHrefs] as const;
     }),
   );
@@ -239,7 +242,6 @@ function buildWorkItem(
       ? (resolved.get(wi.stacCatalogLocation) ?? null)
       : null,
     outputFiles: resolved.get(outputCatalog) ?? null,
-    logs: getItemLogsLocation({ id: wi.id, jobID: wi.jobID }),
   };
 }
 

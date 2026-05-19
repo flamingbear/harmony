@@ -167,10 +167,13 @@ describe('GET /jobs/:jobID/lineage', function () {
       }
     });
 
-    it('includes work items with a deterministic logs S3 path', function () {
+    it('does not expose a logs field on work items', function () {
       const body = JSON.parse(this.res.text);
       const wi1 = body.steps[0].workItems[0];
-      expect(wi1.logs).to.match(new RegExp(`^s3://.*/${ownerJob.jobID}/${wi1.id}/logs\\.json$`));
+      // Logs live behind the admin-only /logs/:jobID/:id endpoint and are not
+      // surfaced through this response. Admins debugging can reach them
+      // directly using the wi.id we expose here.
+      expect(wi1).to.not.have.property('logs');
     });
 
     it('exposes flat inputFiles / outputFiles fields (no nested catalog wrapper)', function () {
