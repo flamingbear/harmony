@@ -73,13 +73,6 @@ response and is the bound on `?expand=` cost.
     "extraArgs": { /* service-specific config */ }
   },
 
-  "pagination": {
-    "currentPage": 1,
-    "perPage": 100,
-    "total": 5,
-    "lastPage": 1
-  },
-
   "steps": [
     {
       "stepIndex": 1,
@@ -140,7 +133,14 @@ response and is the bound on `?expand=` cost.
         }
       ]
     }
-  ]
+  ],
+
+  "pagination": {
+    "currentPage": 1,
+    "perPage": 100,
+    "total": 5,
+    "lastPage": 1
+  }
 }
 ```
 

@@ -19,11 +19,9 @@ import { getCatalogLinks, readCatalogItems } from '../util/stac';
 
 const DEFAULT_PER_PAGE = 100;
 const MAX_PER_PAGE = 1000;
-const VALID_STATUSES: WorkItemStatus[] = [
-  WorkItemStatus.READY, WorkItemStatus.QUEUED, WorkItemStatus.RUNNING,
-  WorkItemStatus.SUCCESSFUL, WorkItemStatus.FAILED, WorkItemStatus.CANCELED,
-  WorkItemStatus.WARNING,
-];
+// Derived from the enum so new statuses are picked up automatically. Safe for
+// string enums (Object.values returns just the value strings, not the names).
+const VALID_STATUSES = Object.values(WorkItemStatus);
 // Allow-list of user-facing fields surfaced from the parsed DataOperation.
 // Internal fields (accessToken, callback, stagingLocation, user, client, version,
 // requestId, isSynchronous, $schema) are intentionally excluded. An allow-list
@@ -359,13 +357,13 @@ export async function getJobLineage(
         truncated: requestTruncated,
       },
       operation,
+      steps: lineageSteps,
       pagination: {
         currentPage: pagination.currentPage,
         perPage: pagination.perPage,
         total: pagination.total,
         lastPage: pagination.lastPage,
       },
-      steps: lineageSteps,
     };
 
     res.json(lineage);
