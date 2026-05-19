@@ -265,6 +265,17 @@ describe('GET /jobs/:jobID/lineage', function () {
     });
   });
 
+  describe('With ?linktype=s3', function () {
+    hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { linktype: 's3' } });
+    it('is accepted (no validation error) and returns 200', function () {
+      // The fixtures have no real STAC catalogs in test S3, so inputFiles /
+      // outputFiles end up empty regardless of linktype. The point of this
+      // assertion is that the param is parsed and threaded through without
+      // erroring out.
+      expect(this.res.statusCode).to.equal(200);
+    });
+  });
+
   describe('Validation errors', function () {
     describe('?status=bogus', function () {
       hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { status: 'bogus' } });

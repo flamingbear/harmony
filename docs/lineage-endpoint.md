@@ -30,6 +30,7 @@ access token may view.
 | `step` | integer | Limit to one workflow step (filters work items by `workflowStepIndex`). |
 | `status` | one of the `WorkItemStatus` values | Limit to work items in a single status. |
 | `workItem` | integer | Limit to a single work item by id. |
+| `linktype` | `s3` or anything else (typically omitted) | Mirrors the `/jobs/:jobID` parameter. When `s3`, raw `s3://` URLs are preserved in `inputFiles` / `outputFiles`. Otherwise (default), URLs are rewritten to `<frontendRoot>/service-results/...` permalinks that 302-redirect to a presigned URL on follow. |
 | `page` | integer (default 1) | Page number for work items. |
 | `perPage` | integer (default 100, max 1000) | Page size for work items. |
 
@@ -95,7 +96,7 @@ on expanding file location and fetching work-items cost.
           "retryCount": 0,
           "startedAt": "2026-05-12T08:42:05.000Z",
           "inputFiles": null,
-          "outputFiles": ["s3://staging-bucket/.../granule_xyz.nc4"],
+          "outputFiles": ["https://harmony.example/service-results/staging-bucket/public/.../granule_xyz.nc4"],
           "logs": "s3://artifacts/<jobID>/9491393/logs.json"
         }
       ]
@@ -112,7 +113,7 @@ on expanding file location and fetching work-items cost.
           "status": "failed",
           "retryCount": 0,
           "startedAt": "2026-05-12T08:43:12.000Z",
-          "inputFiles":  ["s3://staging-bucket/.../granule_xyz.nc4"],
+          "inputFiles":  ["https://harmony.example/service-results/staging-bucket/public/.../granule_xyz.nc4"],
           "outputFiles": [],
           "logs":        "s3://artifacts/<jobID>/9491415/logs.json"
         }
@@ -137,8 +138,8 @@ each one of three values:
 | Value | What it means |
 |---|---|
 | `null` | Nothing to show. For `outputFiles`: the work item has not completed yet (its output catalog doesn't exist). For `inputFiles`: the work item has not completed yet, **or** the work item has no STAC input by design (e.g. step 1 query-cmr WIs). Use the WI's `status` field and the step's `stepIndex` to disambiguate. |
-| `[]` | The work item completed but the relevant catalog was missing, unreadable, or had no STAC items with `role: 'data'`. Common case: a failed WI whose service didn't write its output catalog. |
-| `["s3://..."]` | The catalog was read; these are the data hrefs (verbatim — Harmony does not rewrite `s3://` vs `https://`). |
+| `[]` | The work item completed but the relevant catalog was missing, unreadable, had no STAC items with `role: 'data'`, or every href was unsignable (e.g. an S3 URL outside `/public/`, which is dropped to prevent leaking internal locations). |
+| `["https://harmony.../service-results/..."]` | Resolved data hrefs, run through the same signing path `/jobs/:jobID` uses. By default `s3://bucket/public/...` is rewritten to a `<frontendRoot>/service-results/bucket/...` permalink that 302-redirects to a presigned URL on follow; `https://...` and `s?ftp://...` URLs pass through unchanged. Pass `?linktype=s3` to keep raw `s3://` URLs instead. |
 
 The handler resolves catalogs only for WIs in `COMPLETED_WORK_ITEM_STATUSES`
 (`successful`, `failed`, `canceled`, `warning`). Incomplete WIs (`ready`,
@@ -151,9 +152,13 @@ the asset has `role: 'data'` (or asset name `data`). This is the same logic
 that `services/harmony/app/util/stac.ts` already uses for batch generation
 and work-item updates.
 
-URLs are returned **verbatim** — Harmony does not rewrite `s3://` vs `https://`
-for staged outputs. Whichever protocol the producing service wrote is what
-the lineage endpoint reports.
+URLs are signed via the same `createPublicPermalink` path that `/jobs/:jobID`
+uses for `links` hrefs. By default, the lineage endpoint never exposes raw
+internal S3 locations to clients — `s3://bucket/public/...` becomes a
+`/service-results/...` permalink, `https://...` passes through unchanged,
+and anything else (e.g. an S3 URL outside `/public/`) is dropped. Pass
+`?linktype=s3` to opt out of permalinking for callers that script against
+raw S3.
 
 ## Data sources
 
@@ -169,7 +174,7 @@ the lineage endpoint reports.
 | `logs` | Deterministic: `getItemLogsLocation(workItem)` in `work-item-interface.ts:128` |
 | `cmr.params` | For each query-cmr work item, one S3 GET of `s3UrlForStoredQueryParams(scrollID)` (`cmr.ts:1315`) |
 | `cmr.endpoint` | `env.cmrEndpoint` |
-| `inputFiles` / `outputFiles` for completed WIs | `readCatalogItems(catalogUrl)` then `getCatalogLinks(items)` in `services/harmony/app/util/stac.ts`. The handler collects the unique set of catalog URLs across all *completed* WIs on the current page (each WI's `stacCatalogLocation` for inputs, plus `getStacLocation(workItem)` for outputs) and resolves them with `Promise.all`, so duplicated catalogs (step N output ≡ step N+1 input) cost a single S3 GET and incomplete WIs cost zero. |
+| `inputFiles` / `outputFiles` for completed WIs | `readCatalogItems(catalogUrl)` then `getCatalogLinks(items)` in `services/harmony/app/util/stac.ts`, then each href run through `createPublicPermalink` (`app/frontends/service-results.ts:35`) — the same signing path `/jobs/:jobID` uses. The handler collects the unique set of catalog URLs across all *completed* WIs on the current page (each WI's `stacCatalogLocation` for inputs, plus `getStacLocation(workItem)` for outputs) and resolves them with `Promise.all`, so duplicated catalogs (step N output ≡ step N+1 input) cost a single S3 GET and incomplete WIs cost zero. Hrefs that can't be signed (e.g. internal S3 URLs outside `/public/`) are silently dropped to avoid leaking internal locations. |
 
 ## Redactions
 

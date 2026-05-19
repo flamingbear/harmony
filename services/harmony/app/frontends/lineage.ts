@@ -8,6 +8,7 @@ import {
   WorkItemQuery, WorkItemStatus,
 } from '../models/work-item-interface';
 import WorkflowStep, { getWorkflowStepsByJobId } from '../models/workflow-steps';
+import { createPublicPermalink } from './service-results';
 import { s3UrlForStoredQueryParams } from '../util/cmr';
 import db from '../util/db';
 import { isAdminUser } from '../util/edl-api';
@@ -16,6 +17,7 @@ import { RequestValidationError } from '../util/errors';
 import { getJobIfAllowed } from '../util/job';
 import { defaultObjectStore } from '../util/object-store';
 import { getCatalogLinks, readCatalogItems } from '../util/stac';
+import { getRequestRoot } from '../util/url';
 
 const DEFAULT_PER_PAGE = 100;
 const MAX_PER_PAGE = 1000;
@@ -35,6 +37,7 @@ interface LineageQuery {
   step?: number;
   status?: WorkItemStatus;
   workItem?: number;
+  linkType?: string;
   page: number;
   perPage: number;
 }
@@ -97,6 +100,14 @@ function parseQuery(query: Record<string, unknown>): LineageQuery {
     out.workItem = n;
   }
 
+  // linktype mirrors /jobs/:jobID — pass through to createPublicPermalink.
+  // 's3' keeps raw s3:// URLs (for callers that script against S3); anything
+  // else (including undefined) produces frontend-rooted /service-results
+  // permalinks that pre-sign on follow.
+  if (query.linktype !== undefined) {
+    out.linkType = String(query.linktype).toLowerCase();
+  }
+
   if (query.page !== undefined) {
     const n = Number(query.page);
     if (!Number.isInteger(n) || n < 1) {
@@ -155,6 +166,24 @@ async function resolveDataHrefs(catalogUrl: string): Promise<string[]> {
 }
 
 /**
+ * Convert a raw STAC asset href into the public-facing form Harmony uses
+ * for job links. S3 URLs under `/public/` become `<root>/service-results/...`
+ * permalinks (which pre-sign on follow); HTTPS URLs pass through; anything
+ * else (e.g. an S3 URL outside `/public/`) is dropped to prevent leaking
+ * internal locations. `linkType === 's3'` keeps raw s3:// URLs for callers
+ * scripting against S3 directly.
+ */
+function safePublicLink(
+  href: string, frontendRoot: string, linkType: string | undefined,
+): string | null {
+  try {
+    return createPublicPermalink(href, frontendRoot, undefined, linkType);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Resolve every unique catalog URL referenced by completed work items in
  * parallel. Only WIs in COMPLETED_WORK_ITEM_STATUSES contribute URLs;
  * incomplete WIs reliably have no catalog yet, so attempting to read theirs
@@ -168,6 +197,8 @@ async function resolveDataHrefs(catalogUrl: string): Promise<string[]> {
  */
 async function resolveAllCatalogs(
   workItems: WorkItem[],
+  frontendRoot: string,
+  linkType: string | undefined,
 ): Promise<Map<string, string[]>> {
   const urls = new Set<string>();
   for (const wi of workItems) {
@@ -176,7 +207,13 @@ async function resolveAllCatalogs(
     urls.add(getStacLocation({ id: wi.id, jobID: wi.jobID }, 'catalog.json'));
   }
   const entries = await Promise.all(
-    Array.from(urls).map(async (url) => [url, await resolveDataHrefs(url)] as const),
+    Array.from(urls).map(async (url) => {
+      const rawHrefs = await resolveDataHrefs(url);
+      const publicHrefs = rawHrefs
+        .map((h) => safePublicLink(h, frontendRoot, linkType))
+        .filter((h): h is string => h !== null);
+      return [url, publicHrefs] as const;
+    }),
   );
   return new Map(entries);
 }
@@ -305,7 +342,8 @@ export async function getJobLineage(
       db, workItemQuery, q.page, q.perPage,
     );
 
-    const resolvedCatalogs = await resolveAllCatalogs(workItems);
+    const frontendRoot = getRequestRoot(req);
+    const resolvedCatalogs = await resolveAllCatalogs(workItems, frontendRoot, q.linkType);
     const lineageSteps = await buildSteps(steps, workItems, resolvedCatalogs, q);
 
     // The DataOperation is largely the same across steps (it gets passed
