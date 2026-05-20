@@ -218,7 +218,7 @@ export default function router({ USE_EDL_CLIENT_APP = 'false' }: RouterConfig): 
   }
 
   // Routes and middleware not dealing with service requests
-  result.get('/service-results/:bucket/public/:jobId/:workItemId/:remainingPath(*)', asyncHandler(getServiceResult));
+  result.get('/service-results/:bucket/public/:jobId([0-9a-fA-F-]{36})/:workItemId/:remainingPath(*)', asyncHandler(getServiceResult));
   result.get('/service-results/:bucket/:remainingPath(*)', asyncHandler(getServiceResult));
 
   // Routes and middleware for handling service requests
