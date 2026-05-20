@@ -113,6 +113,8 @@ export class JobForDisplay {
 
   labels: string[];
 
+  lineage?: string;
+
   request: string;
 
   numInputGranules: number;
@@ -1189,6 +1191,7 @@ export class Job extends DBRecord implements JobRecord {
       dataExpiration: this.getDataExpiration(),
       links: this.links,
       labels: this.labels,
+      lineage: urlRoot ? `${urlRoot}/jobs/${this.jobID}/lineage` : undefined,
       request: this.request,
       numInputGranules: this.numInputGranules,
       jobID: this.jobID,
