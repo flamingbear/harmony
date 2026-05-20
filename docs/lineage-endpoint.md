@@ -9,8 +9,12 @@ the job.
 
 The primary use case is **debugging a failed service**: given a failed work
 item, a developer wants the actual data file URL that was passed to that
-service. A secondary use case is **job introspection** — a JSON-shaped view
-of the data the existing HTML `/workflow-ui/:jobID` page already renders.
+service.
+
+A secondary use case is **Parital Job Completion** — Allowing a user who had a
+workstep that may have failed the ability to find and get the output that did
+work.
+
 
 ## Route
 
@@ -30,44 +34,40 @@ access token may view.
 | `step` | integer | Limit to one workflow step (filters work items by `workflowStepIndex`). |
 | `status` | one of the `WorkItemStatus` values | Limit to work items in a single status. |
 | `workItem` | integer | Limit to a single work item by id. |
-| `linktype` | `s3`, `http`, `https`, or absent | Controls how `inputFiles` / `outputFiles` URLs are rendered. See the **`linktype`** section below for the full table. |
 | `page` | integer (default 1) | Page number for work items. |
 | `perPage` | integer (default 100, max 1000) | Page size for work items. |
+
+This endpoint deliberately does **not** accept a `linktype` parameter — see
+*Related: `linktype` on `/jobs/:jobID`* below.
 
 All filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
 work-item helper, so a job with a million work items never round-trips a
 million rows. Pagination metadata is included in the response and is the bound
 on expanding file location and fetching work-items cost.
 
-### `linktype`
+### Related: `linktype` on `/jobs/:jobID`
 
-`linktype` controls how the URLs in `inputFiles` and `outputFiles` are
-rendered. The same parameter and meaning exist on `/jobs/:jobID`; this
-endpoint forwards it through `createPublicPermalink` so both endpoints
-shape URLs the same way.
+The lineage endpoint always renders file URLs as `/service-results/...`
+permalinks (see *The `inputFiles` / `outputFiles` contract* below).
+If you need the raw `s3://` form instead, use the existing
+`/jobs/:jobID` endpoint, which accepts `?linktype=`. That parameter is
+**not** accepted here; passing it has no effect.
 
-Three transforms are applied per asset href, depending on the href's
-protocol and `linktype`:
+For reference, `/jobs/:jobID?linktype=...` shapes the `links[].href` values
+it returns according to the following table:
 
 | Original href | `?linktype=s3` | otherwise (default) |
 |---|---|---|
 | `s3://bucket/public/path/file.nc4` | `s3://bucket/public/path/file.nc4` (verbatim) | `https://<frontendRoot>/service-results/bucket/public/path/file.nc4` |
 | `https://...` or `s?ftp://...` | passes through unchanged | passes through unchanged |
-| `s3://bucket/SOMETHING-NOT-public/...` | replaced with `"<private file location>"` | replaced with `"<private file location>"` |
-| Anything else (unrecognized protocol) | replaced with `"<private file location>"` | replaced with `"<private file location>"` |
+| `s3://bucket/SOMETHING-NOT-public/...` | (handled by `createPublicPermalink`; throws today) | (same) |
 
-When the default applies, the resulting `/service-results/...` URL is a
-stable Harmony endpoint. Following it returns a 302 to a presigned S3 URL
-generated at follow-time, so the response itself doesn't carry expiring
-credentials.
-
-Use `?linktype=s3` when you want raw S3 paths to script against (e.g. pipe
-into `aws s3 cp`). Use the default when you want a URL you can curl/share.
-
-The `"<private file location>"` sentinel preserves cardinality: a work item
-that produced three files but two are unsignable shows three array entries
-with two sentinels, so the caller can see something exists at that position
-even when they're not allowed to fetch it.
+`/jobs/:jobID` uses the same `createPublicPermalink` helper this endpoint
+uses; the only difference is that this endpoint pins it to the default
+(permalink) branch and substitutes a `"<private file location>"` sentinel
+for hrefs `createPublicPermalink` rejects, rather than throwing. The
+intent is that lineage responses never leak internal S3 locations to
+clients regardless of what's in a service's STAC output.
 
 
 ## Response shape
@@ -167,7 +167,7 @@ each one of three values:
 |---|---|
 | `null` | Nothing to show. For `outputFiles`: the work item has not completed yet (its output catalog doesn't exist). For `inputFiles`: the work item has not completed yet, **or** the work item has no STAC input by design (e.g. step 1 query-cmr WIs). Use the WI's `status` field and the step's `stepIndex` to disambiguate. |
 | `[]` | The work item completed but the relevant catalog was missing, unreadable, or had no STAC items with `role: 'data'`. |
-| `["https://harmony.../service-results/...", "<private file location>", ...]` | Resolved data hrefs, run through the same signing path `/jobs/:jobID` uses. By default `s3://bucket/public/...` is rewritten to a `<frontendRoot>/service-results/bucket/...` permalink that 302-redirects to a presigned URL on follow; `https://...` and `s?ftp://...` URLs pass through unchanged. Pass `?linktype=s3` to keep raw `s3://` URLs instead. Hrefs that can't be signed (e.g. internal S3 URLs outside `/public/`) appear as the literal sentinel `"<private file location>"` so the caller sees the cardinality of the file list, not just the accessible subset. |
+| `["https://harmony.../service-results/...", "<private file location>", ...]` | Resolved data hrefs, run through the same `createPublicPermalink` helper `/jobs/:jobID` uses. `s3://bucket/public/...` is rewritten to a `<frontendRoot>/service-results/bucket/...` permalink that 302-redirects to a presigned URL on follow; `https://...` and `s?ftp://...` URLs pass through unchanged. Hrefs that can't be signed (e.g. internal S3 URLs outside `/public/`) appear as the literal sentinel `"<private file location>"` so the caller sees the cardinality of the file list, not just the accessible subset. There is no raw-S3 escape hatch here; use `/jobs/:jobID?linktype=s3` if you need that. |
 
 The handler resolves catalogs only for WIs in `COMPLETED_WORK_ITEM_STATUSES`
 (`successful`, `failed`, `canceled`, `warning`). Incomplete WIs (`ready`,
@@ -181,14 +181,13 @@ that `services/harmony/app/util/stac.ts` already uses for batch generation
 and work-item updates.
 
 URLs are signed via the same `createPublicPermalink` path that `/jobs/:jobID`
-uses for `links` hrefs. By default, the lineage endpoint never exposes raw
-internal S3 locations to clients — `s3://bucket/public/...` becomes a
-`/service-results/...` permalink, `https://...` passes through unchanged,
-and anything else (e.g. an S3 URL outside `/public/`) is replaced with the
-sentinel `"<private file location>"` so the caller still sees that a file
-exists at that position even though they're not allowed to fetch it. Pass
-`?linktype=s3` to opt out of permalinking for callers that script against
-raw S3.
+uses for `links` hrefs. The lineage endpoint never exposes raw internal S3
+locations to clients — `s3://bucket/public/...` becomes a `/service-results/...`
+permalink, `https://...` passes through unchanged, and anything else (e.g.
+an S3 URL outside `/public/`) is replaced with the sentinel `"<private file
+location>"` so the caller still sees that a file exists at that position
+even though they're not allowed to fetch it. There is no opt-out for raw
+S3 here — `/jobs/:jobID?linktype=s3` is the place for that.
 
 ## Data sources
 

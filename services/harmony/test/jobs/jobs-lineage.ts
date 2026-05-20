@@ -271,13 +271,12 @@ describe('GET /jobs/:jobID/lineage', function () {
     });
   });
 
-  describe('With ?linktype=s3', function () {
+  describe('With ?linktype= (unknown to this endpoint)', function () {
     hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { linktype: 's3' } });
-    it('is accepted (no validation error) and returns 200', function () {
-      // The fixtures have no real STAC catalogs in test S3, so inputFiles /
-      // outputFiles end up empty regardless of linktype. The point of this
-      // assertion is that the param is parsed and threaded through without
-      // erroring out.
+    it('ignores the param rather than erroring (no validation, no effect)', function () {
+      // /jobs/:jobID accepts linktype; lineage deliberately does not. Express
+      // hands unknown query params through harmlessly; we just want to verify
+      // we didn't accidentally start rejecting requests for unknown params.
       expect(this.res.statusCode).to.equal(200);
     });
   });

@@ -38,7 +38,6 @@ interface LineageQuery {
   step?: number;
   status?: WorkItemStatus;
   workItem?: number;
-  linkType?: string;
   page: number;
   perPage: number;
 }
@@ -98,14 +97,6 @@ function parseQuery(query: Record<string, unknown>): LineageQuery {
       throw new RequestValidationError('workItem must be a positive integer');
     }
     out.workItem = n;
-  }
-
-  // linktype mirrors /jobs/:jobID — pass through to createPublicPermalink.
-  // 's3' keeps raw s3:// URLs (for callers that script against S3); anything
-  // else (including undefined) produces frontend-rooted /service-results
-  // permalinks that pre-sign on follow.
-  if (query.linktype !== undefined) {
-    out.linkType = String(query.linktype).toLowerCase();
   }
 
   if (query.page !== undefined) {
@@ -177,14 +168,12 @@ const PRIVATE_FILE_PLACEHOLDER = '<private file location>';
  * for job links. S3 URLs under `/public/` become `<root>/service-results/...`
  * permalinks (which pre-sign on follow); HTTPS URLs pass through; anything
  * else (e.g. an S3 URL outside `/public/`) becomes the PRIVATE_FILE_PLACEHOLDER
- * sentinel. `linkType === 's3'` keeps raw s3:// URLs for callers scripting
- * against S3 directly.
+ * sentinel. This endpoint deliberately does not expose the `linktype=s3`
+ * escape hatch — callers who need raw `s3://` URLs should use `/jobs/:jobID`.
  */
-function safePublicLink(
-  href: string, frontendRoot: string, linkType: string | undefined,
-): string {
+function safePublicLink(href: string, frontendRoot: string): string {
   try {
-    return createPublicPermalink(href, frontendRoot, undefined, linkType);
+    return createPublicPermalink(href, frontendRoot);
   } catch {
     return PRIVATE_FILE_PLACEHOLDER;
   }
@@ -205,7 +194,6 @@ function safePublicLink(
 async function resolveAllCatalogs(
   workItems: WorkItem[],
   frontendRoot: string,
-  linkType: string | undefined,
 ): Promise<Map<string, string[]>> {
   const urls = new Set<string>();
   for (const wi of workItems) {
@@ -216,7 +204,7 @@ async function resolveAllCatalogs(
   const entries = await Promise.all(
     Array.from(urls).map(async (url) => {
       const rawHrefs = await resolveDataHrefs(url);
-      const publicHrefs = rawHrefs.map((h) => safePublicLink(h, frontendRoot, linkType));
+      const publicHrefs = rawHrefs.map((h) => safePublicLink(h, frontendRoot));
       return [url, publicHrefs] as const;
     }),
   );
@@ -350,7 +338,7 @@ export async function getJobLineage(
     );
 
     const frontendRoot = getRequestRoot(req);
-    const resolvedCatalogs = await resolveAllCatalogs(workItems, frontendRoot, q.linkType);
+    const resolvedCatalogs = await resolveAllCatalogs(workItems, frontendRoot);
     const lineageSteps = await buildSteps(steps, workItems, resolvedCatalogs, q);
 
     // The DataOperation is largely the same across steps (it gets passed
