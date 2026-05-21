@@ -22,13 +22,11 @@ import { getRequestRoot } from '../util/url';
 
 const DEFAULT_PER_PAGE = 100;
 const MAX_PER_PAGE = 1000;
-// Derived from the enum so new statuses are picked up automatically. Safe for
-// string enums (Object.values returns just the value strings, not the names).
 const VALID_STATUSES = Object.values(WorkItemStatus);
+
 // Allow-list of user-facing fields surfaced from the parsed DataOperation.
-// Internal fields (accessToken, callback, stagingLocation, user, client, version,
-// requestId, isSynchronous, $schema) are intentionally excluded. An allow-list
-// avoids leaking newly added internal fields when the operation schema evolves.
+// Internal fields (accessToken, callback, stagingLocation, etc.) are
+// intentionally excluded.
 const OPERATION_PUBLIC_FIELDS = [
   'sources', 'format', 'subset', 'extendDimensions', 'temporal',
   'concatenate', 'average', 'pixelSubset', 'extraArgs',
@@ -70,7 +68,10 @@ interface LineageStep {
 
 /**
  * Parse the query parameters used to filter and shape the lineage response.
- * Throws RequestValidationError on any invalid input.
+ *
+ * @param query - the raw request query string parameters
+ * @returns the validated and normalized lineage query
+ * @throws RequestValidationError - if any parameter is not a valid value
  */
 function parseQuery(query: Record<string, unknown>): LineageQuery {
   const out: LineageQuery = { page: 1, perPage: DEFAULT_PER_PAGE };
@@ -120,10 +121,13 @@ function parseQuery(query: Record<string, unknown>): LineageQuery {
 
 /**
  * Parse a workflow step's stored operation JSON and project it down to the
- * curated allow-list of user-facing fields. Returns null if the JSON cannot
- * be parsed. The allow-list ensures internal fields (accessToken, callback,
- * stagingLocation, etc.) are never leaked, even if the operation schema gains
- * new fields in the future.
+ * curated allow-list of user-facing fields. The allow-list ensures internal
+ * fields (accessToken, callback, stagingLocation, etc.) are never leaked, even
+ * if the operation schema gains new fields in the future.
+ *
+ * @param operationJson - the serialized DataOperation from a workflow step
+ * @returns the operation projected to OPERATION_PUBLIC_FIELDS, or null if the
+ *   JSON is empty or cannot be parsed
  */
 function pickPublicOperationFields(
   operationJson: string,
@@ -143,9 +147,12 @@ function pickPublicOperationFields(
 }
 
 /**
- * Read the input STAC catalog for a work item and return the resolved data
- * hrefs. Returns an empty array if the catalog cannot be read (e.g. the
- * service failed before producing it, or the catalog has no data assets).
+ * Read a STAC catalog and return the resolved data hrefs it references.
+ *
+ * @param catalogUrl - the location of the STAC catalog to read
+ * @returns the data hrefs from the catalog, or an empty array if the catalog
+ *   cannot be read (e.g. the service failed before producing it, or the
+ *   catalog has no data assets)
  */
 async function resolveDataHrefs(catalogUrl: string): Promise<string[]> {
   try {
@@ -166,10 +173,14 @@ const PRIVATE_FILE_PLACEHOLDER = '<private file location>';
 /**
  * Convert a raw STAC asset href into the public-facing form Harmony uses
  * for job links. S3 URLs under `/public/` become `<root>/service-results/...`
- * permalinks (which pre-sign on follow); HTTPS URLs pass through; anything
- * else (e.g. an S3 URL outside `/public/`) becomes the PRIVATE_FILE_PLACEHOLDER
- * sentinel. This endpoint deliberately does not expose the `linktype=s3`
- * escape hatch — callers who need raw `s3://` URLs should use `/jobs/:jobID`.
+ * permalinks (which pre-sign on follow); HTTPS URLs pass through. This endpoint
+ * deliberately does not expose the `linktype=s3` escape hatch — callers who
+ * need raw `s3://` URLs should use `/jobs/:jobID`.
+ *
+ * @param href - the raw STAC asset href to convert
+ * @param frontendRoot - The root URL to use when producing Harmony permalinks
+ * @returns the public-facing link, or the PRIVATE_FILE_PLACEHOLDER sentinel if
+ *   the href cannot be signed (e.g. an S3 URL outside `/public/`)
  */
 function safePublicLink(href: string, frontendRoot: string): string {
   try {
@@ -187,9 +198,11 @@ function safePublicLink(href: string, frontendRoot: string): string {
  * to step N+1's input catalog, the Set-based dedupe ensures each unique
  * catalog is fetched exactly once across the whole page.
  *
- * Returns a map from catalog URL to its data hrefs (empty array when the
- * catalog is missing or has no data assets). Catalog URLs NOT in the map
- * belong to incomplete WIs; the handler treats those as `files: null`.
+ * @param workItems - the page of work items whose catalogs should be resolved
+ * @param frontendRoot - The root URL to use when producing Harmony permalinks
+ * @returns a map from catalog URL to its public-facing data hrefs (empty array
+ *   when the catalog is missing or has no data assets). Catalog URLs NOT in the
+ *   map belong to incomplete WIs; the handler treats those as `files: null`.
  */
 async function resolveAllCatalogs(
   workItems: WorkItem[],
@@ -217,6 +230,10 @@ async function resolveAllCatalogs(
  * (because the WI was incomplete when resolveAllCatalogs ran) surface as
  * `null`. WIs that never have a STAC input (e.g. query-cmr step 1) always
  * report `inputFiles: null`.
+ *
+ * @param wi - the work item to serialize
+ * @param resolved - the catalog-URL-to-data-hrefs map from resolveAllCatalogs
+ * @returns the work item shaped for the lineage response
  */
 function buildWorkItem(
   wi: WorkItem,
@@ -239,6 +256,10 @@ function buildWorkItem(
  * For the work items belonging to a query-cmr step, fetch each stored CMR
  * query (one per scrollID) from S3 and return them inlined. Failures are
  * silent: if a SearchParams object is missing, that call is omitted.
+ *
+ * @param workItems - the query-cmr work items whose stored queries to fetch
+ * @returns the resolved CMR queries, one entry per work item with a readable
+ *   SearchParams object
  */
 async function buildCmrCalls(
   workItems: WorkItem[],
@@ -261,6 +282,12 @@ async function buildCmrCalls(
  * Build the full lineage step list. The workItems passed in are already
  * the filtered, paginated set; this function groups them under their parent
  * step. Steps whose stepIndex was filtered out by ?step= are omitted.
+ *
+ * @param steps - all workflow steps for the job
+ * @param workItems - the filtered, paginated page of work items to group
+ * @param resolved - the catalog-URL-to-data-hrefs map from resolveAllCatalogs
+ * @param q - the parsed lineage query, used to honor the ?step= filter
+ * @returns the lineage steps with their work items and any CMR call details
  */
 async function buildSteps(
   steps: WorkflowStep[],
@@ -305,10 +332,15 @@ async function buildSteps(
 }
 
 /**
- * Express handler for GET /jobs/:jobID/lineage. Returns a JSON document
+ * Express.js handler for GET /jobs/:jobID/lineage. Returns a JSON document
  * describing the job, its workflow steps, and the inputs/outputs of the
  * filtered + paginated work items. See docs/lineage-endpoint.md for the
  * response shape.
+ *
+ * @param req - The request sent by the client
+ * @param res - The response to send to the client
+ * @param next - The next function in the call chain
+ * @returns Resolves when the request is complete
  */
 export async function getJobLineage(
   req: HarmonyRequest, res: Response, next: NextFunction,
