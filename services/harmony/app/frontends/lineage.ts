@@ -24,14 +24,13 @@ const DEFAULT_PER_PAGE = 100;
 const MAX_PER_PAGE = 1000;
 const VALID_STATUSES = Object.values(WorkItemStatus);
 
-// Allow-list of user-facing fields surfaced from the parsed DataOperation.
-// Internal fields (accessToken, callback, stagingLocation, etc.) are
-// intentionally excluded.
+// List of fields presented to the user surfaced from the parsed DataOperation.
 const OPERATION_PUBLIC_FIELDS = [
   'sources', 'format', 'subset', 'extendDimensions', 'temporal',
   'concatenate', 'average', 'pixelSubset', 'extraArgs',
 ] as const;
 
+// lineage query parameters
 interface LineageQuery {
   step?: number;
   status?: WorkItemStatus;
@@ -40,22 +39,16 @@ interface LineageQuery {
   perPage: number;
 }
 
-// inputFiles / outputFiles three-state contract:
-//   null  = nothing to show — either the WI hasn't completed yet, or (inputFiles
-//           only) the WI never had a STAC input by design (e.g. query-cmr step).
-//   []    = the WI completed but the catalog was missing or had no data assets
-//           (e.g. failed WI whose service didn't write its output catalog).
-//   [...] = resolved data hrefs from the STAC catalog.
 interface LineageWorkItem {
   id: number;
   status: WorkItemStatus;
   retryCount: number;
-  startedAt: Date | null;
+  startedAt: Date | null;  // TODO [MHS, 05/21/2026] Should we nuke this? Feels extraneous.
   inputFiles: string[] | null;
   outputFiles: string[] | null;
 }
 
-interface LineageStep {
+interface LineageWorkflowStep {
   stepIndex: number;
   serviceID: string;
   workItemCount: number;
@@ -120,13 +113,11 @@ function parseQuery(query: Record<string, unknown>): LineageQuery {
 }
 
 /**
- * Parse a workflow step's stored operation JSON and project it down to the
- * curated allow-list of user-facing fields. The allow-list ensures internal
- * fields (accessToken, callback, stagingLocation, etc.) are never leaked, even
- * if the operation schema gains new fields in the future.
+ * Parse a workflow step's operation JSON and pare it down to the
+ * curated list of fields to show the user.
  *
  * @param operationJson - the serialized DataOperation from a workflow step
- * @returns the operation projected to OPERATION_PUBLIC_FIELDS, or null if the
+ * @returns the operation pared to just OPERATION_PUBLIC_FIELDS, or null if the
  *   JSON is empty or cannot be parsed
  */
 function pickPublicOperationFields(
@@ -164,18 +155,14 @@ async function resolveDataHrefs(catalogUrl: string): Promise<string[]> {
 }
 
 // Placeholder used in inputFiles / outputFiles when a STAC asset href cannot
-// be turned into a public link (e.g. an S3 URL outside `/public/`). Preserves
-// the cardinality of the file list so the caller can see "there were N files,
-// M of them I'm not allowed to see" rather than silently dropping entries.
-// The angle brackets make this unambiguously not a URL.
+// be turned into a public link.
+// TODO [MHS, 05/21/2026] I don't think this will ever be used, should I keep it?.
 const PRIVATE_FILE_PLACEHOLDER = '<private file location>';
 
 /**
  * Convert a raw STAC asset href into the public-facing form Harmony uses
  * for job links. S3 URLs under `/public/` become `<root>/service-results/...`
- * permalinks (which pre-sign on follow); HTTPS URLs pass through. This endpoint
- * deliberately does not expose the `linktype=s3` escape hatch — callers who
- * need raw `s3://` URLs should use `/jobs/:jobID`.
+ * permalinks (which pre-sign on follow); HTTPS URLs pass through.
  *
  * @param href - the raw STAC asset href to convert
  * @param frontendRoot - The root URL to use when producing Harmony permalinks
@@ -193,10 +180,9 @@ function safePublicLink(href: string, frontendRoot: string): string {
 /**
  * Resolve every unique catalog URL referenced by completed work items in
  * parallel. Only WIs in COMPLETED_WORK_ITEM_STATUSES contribute URLs;
- * incomplete WIs reliably have no catalog yet, so attempting to read theirs
- * would be wasted 404s. Because step N's output catalog is byte-identical
- * to step N+1's input catalog, the Set-based dedupe ensures each unique
- * catalog is fetched exactly once across the whole page.
+ * incomplete WIs reliably have no catalog yet.  Because step N's output
+ * catalog is step N+1's input catalog, the Set-based dedupe ensures each
+ * unique catalog is fetched exactly once across the whole page.
  *
  * @param workItems - the page of work items whose catalogs should be resolved
  * @param frontendRoot - The root URL to use when producing Harmony permalinks
@@ -294,7 +280,7 @@ async function buildSteps(
   workItems: WorkItem[],
   resolved: Map<string, string[]>,
   q: LineageQuery,
-): Promise<LineageStep[]> {
+): Promise<LineageWorkflowStep[]> {
   const byStep = new Map<number, WorkItem[]>();
   for (const wi of workItems) {
     const arr = byStep.get(wi.workflowStepIndex) ?? [];
@@ -302,12 +288,12 @@ async function buildSteps(
     byStep.set(wi.workflowStepIndex, arr);
   }
 
-  const result: LineageStep[] = [];
+  const result: LineageWorkflowStep[] = [];
   for (const step of steps) {
     if (q.step !== undefined && step.stepIndex !== q.step) continue;
     const stepWorkItems = byStep.get(step.stepIndex) ?? [];
 
-    const lineageStep: LineageStep = {
+    const lineageWorkflowStep: LineageWorkflowStep = {
       stepIndex: step.stepIndex,
       // Strip AWS ECR account and earthdata.nasa.gov host prefixes from the
       // service image name (e.g. "123.dkr.ecr.us-west-2.amazonaws.com/foo:1.0"
@@ -319,13 +305,13 @@ async function buildSteps(
 
     const cmrWorkItems = stepWorkItems.filter((wi) => wi.scrollID);
     if (cmrWorkItems.length > 0) {
-      lineageStep.cmr = {
+      lineageWorkflowStep.cmr = {
         endpoint: env.cmrEndpoint,
         calls: await buildCmrCalls(cmrWorkItems),
       };
     }
 
-    result.push(lineageStep);
+    result.push(lineageWorkflowStep);
   }
 
   return result;
@@ -371,7 +357,7 @@ export async function getJobLineage(
 
     const frontendRoot = getRequestRoot(req);
     const resolvedCatalogs = await resolveAllCatalogs(workItems, frontendRoot);
-    const lineageSteps = await buildSteps(steps, workItems, resolvedCatalogs, q);
+    const lineageWorkflowSteps = await buildSteps(steps, workItems, resolvedCatalogs, q);
 
     // The DataOperation is largely the same across steps (it gets passed
     // step-to-step with minor mutations); surface it once at the response
@@ -400,7 +386,7 @@ export async function getJobLineage(
         truncated: requestTruncated,
       },
       operation,
-      steps: lineageSteps,
+      steps: lineageWorkflowSteps,
       pagination: {
         currentPage: pagination.currentPage,
         perPage: pagination.perPage,
