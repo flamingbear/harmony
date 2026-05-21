@@ -43,7 +43,6 @@ interface LineageWorkItem {
   id: number;
   status: WorkItemStatus;
   retryCount: number;
-  startedAt: Date | null;  // TODO [MHS, 05/21/2026] Should we nuke this? Feels extraneous.
   inputFiles: string[] | null;
   outputFiles: string[] | null;
 }
@@ -156,7 +155,9 @@ async function resolveDataHrefs(catalogUrl: string): Promise<string[]> {
 
 // Placeholder used in inputFiles / outputFiles when a STAC asset href cannot
 // be turned into a public link.
-// TODO [MHS, 05/21/2026] I don't think this will ever be used, should I keep it?.
+// TODO [MHS, 05/21/2026] I don't think this will ever be used, should I keep
+// it?.  I was thinking it would be for the artifact buckets originally, but
+// only the catalogs are behind private locations.
 const PRIVATE_FILE_PLACEHOLDER = '<private file location>';
 
 /**
@@ -178,11 +179,7 @@ function safePublicLink(href: string, frontendRoot: string): string {
 }
 
 /**
- * Resolve every unique catalog URL referenced by completed work items in
- * parallel. Only WIs in COMPLETED_WORK_ITEM_STATUSES contribute URLs;
- * incomplete WIs reliably have no catalog yet.  Because step N's output
- * catalog is step N+1's input catalog, the Set-based dedupe ensures each
- * unique catalog is fetched exactly once across the whole page.
+ * Resolve every unique catalog URL referenced by completed work items.
  *
  * @param workItems - the page of work items whose catalogs should be resolved
  * @param frontendRoot - The root URL to use when producing Harmony permalinks
@@ -230,7 +227,6 @@ function buildWorkItem(
     id: wi.id,
     status: wi.status,
     retryCount: wi.retryCount,
-    startedAt: wi.startedAt ?? null,
     inputFiles: wi.stacCatalogLocation
       ? (resolved.get(wi.stacCatalogLocation) ?? null)
       : null,
