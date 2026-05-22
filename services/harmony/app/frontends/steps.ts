@@ -30,8 +30,8 @@ const OPERATION_PUBLIC_FIELDS = [
   'concatenate', 'average', 'pixelSubset', 'extraArgs',
 ] as const;
 
-// lineage query parameters
-interface LineageQuery {
+// query parameters for the steps endpoint
+interface StepsQuery {
   step?: number;
   status?: WorkItemStatus;
   workItem?: number;
@@ -39,7 +39,7 @@ interface LineageQuery {
   perPage: number;
 }
 
-interface LineageWorkItem {
+interface StepWorkItem {
   id: number;
   status: WorkItemStatus;
   retryCount: number;
@@ -47,7 +47,7 @@ interface LineageWorkItem {
   outputFiles: string[] | null;
 }
 
-interface LineageWorkflowStep {
+interface JobStep {
   serviceID: string;
   stepIndex: number;
   workItemCount: number;
@@ -55,18 +55,18 @@ interface LineageWorkflowStep {
     endpoint: string;
     calls: { workItemId: number; params: unknown }[];
   };
-  workItems: LineageWorkItem[];
+  workItems: StepWorkItem[];
 }
 
 /**
- * Parse the query parameters used to filter and shape the lineage response.
+ * Parse the query parameters used to filter and shape the steps response.
  *
  * @param query - the raw request query string parameters
- * @returns the validated and normalized lineage query
+ * @returns the validated and normalized steps query
  * @throws RequestValidationError - if any parameter is not a valid value
  */
-function parseQuery(query: Record<string, unknown>): LineageQuery {
-  const out: LineageQuery = { page: 1, perPage: DEFAULT_PER_PAGE };
+function parseQuery(query: Record<string, unknown>): StepsQuery {
+  const out: StepsQuery = { page: 1, perPage: DEFAULT_PER_PAGE };
 
   if (query.step !== undefined) {
     const n = Number(query.step);
@@ -216,12 +216,12 @@ async function resolveAllCatalogs(
  *
  * @param wi - the work item to serialize
  * @param resolved - the catalog-URL-to-data-hrefs map from resolveAllCatalogs
- * @returns the work item shaped for the lineage response
+ * @returns the work item shaped for the steps response
  */
 function buildWorkItem(
   wi: WorkItem,
   resolved: Map<string, string[]>,
-): LineageWorkItem {
+): StepWorkItem {
   const outputCatalog = getStacLocation({ id: wi.id, jobID: wi.jobID }, 'catalog.json');
   return {
     id: wi.id,
@@ -268,15 +268,15 @@ async function buildCmrCalls(
  * @param workflowSteps - all workflow steps for the job
  * @param workItems - the filtered, paginated page of work items to group
  * @param resolved - the catalog-URL-to-data-hrefs map from resolveAllCatalogs
- * @param q - the parsed lineage query, used to honor the ?step= filter
- * @returns the lineage steps with their work items and any CMR call details
+ * @param q - the parsed steps query, used to honor the ?step= filter
+ * @returns the steps with their work items and any CMR call details
  */
 async function buildSteps(
   workflowSteps: WorkflowStep[],
   workItems: WorkItem[],
   resolved: Map<string, string[]>,
-  q: LineageQuery,
-): Promise<LineageWorkflowStep[]> {
+  q: StepsQuery,
+): Promise<JobStep[]> {
 
   // group the workitems by their stepindex (one for each service in the chain)
   const byStepIndex = new Map<number, WorkItem[]>();
@@ -286,7 +286,7 @@ async function buildSteps(
     byStepIndex.set(wi.workflowStepIndex, arr);
   }
 
-  const result: LineageWorkflowStep[] = [];
+  const result: JobStep[] = [];
   const filtering = q.status !== undefined || q.workItem !== undefined;
   for (const step of workflowSteps) {
     if (q.step !== undefined && step.stepIndex !== q.step) continue;
@@ -294,7 +294,7 @@ async function buildSteps(
     // Don't show steps with no workitems
     if (filtering && stepWorkItems.length === 0) continue;
 
-    const lineageWorkflowStep: LineageWorkflowStep = {
+    const jobStep: JobStep = {
       serviceID: sanitizeImage(step.serviceID),
       stepIndex: step.stepIndex,
       workItemCount: step.workItemCount,
@@ -303,20 +303,20 @@ async function buildSteps(
 
     const cmrWorkItems = stepWorkItems.filter((wi) => wi.scrollID);
     if (cmrWorkItems.length > 0) {
-      lineageWorkflowStep.cmr = {
+      jobStep.cmr = {
         endpoint: env.cmrEndpoint,
         calls: await buildCmrCalls(cmrWorkItems),
       };
     }
 
-    result.push(lineageWorkflowStep);
+    result.push(jobStep);
   }
 
   return result;
 }
 
 /**
- * Express.js handler for GET /jobs/:jobID/lineage. Returns a JSON document
+ * Express.js handler for GET /jobs/:jobID/steps. Returns a JSON document
  * describing the job, its workflow steps, and the inputs/outputs
  *
  * @param req - The request sent by the client
@@ -324,7 +324,7 @@ async function buildSteps(
  * @param next - The next function in the call chain
  * @returns Resolves when the request is complete
  */
-export async function getJobLineage(
+export async function getJobSteps(
   req: HarmonyRequest, res: Response, next: NextFunction,
 ): Promise<void> {
   const { jobID } = req.params;
@@ -350,7 +350,7 @@ export async function getJobLineage(
 
     const frontendRoot = getRequestRoot(req);
     const resolvedCatalogs = await resolveAllCatalogs(workItems, frontendRoot);
-    const lineageWorkflowSteps = await buildSteps(steps, workItems, resolvedCatalogs, q);
+    const jobSteps = await buildSteps(steps, workItems, resolvedCatalogs, q);
 
     const firstOperationStep = steps.find((s) => s.stepIndex === 1) ?? steps[0];
     const operation = firstOperationStep
@@ -358,7 +358,7 @@ export async function getJobLineage(
       : null;
 
     const requestTruncated = !!job.request && job.request.length === TEXT_LIMIT;
-    const lineage = {
+    const responseBody = {
       jobID: job.jobID,
       status: job.status,
       progress: job.progress,
@@ -372,7 +372,7 @@ export async function getJobLineage(
         truncated: requestTruncated,
       },
       operation,
-      steps: lineageWorkflowSteps,
+      steps: jobSteps,
       pagination: {
         currentPage: pagination.currentPage,
         perPage: pagination.perPage,
@@ -381,7 +381,7 @@ export async function getJobLineage(
       },
     };
 
-    res.json(lineage);
+    res.json(responseBody);
   } catch (e) {
     req.context.logger.error(e);
     next(e);

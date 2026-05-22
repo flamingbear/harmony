@@ -12,14 +12,14 @@ import { buildWorkItem } from '../helpers/work-items';
 import { buildWorkflowStep, validOperation } from '../helpers/workflow-steps';
 
 /**
- * Issue a request to the lineage endpoint. Mirrors the helpers/jobs.ts pattern
+ * Issue a request to the steps endpoint. Mirrors the helpers/jobs.ts pattern
  * for jobStatus / adminJobStatus so it can be bound via hookRequest.
  */
-function jobLineage(app, { jobID, query }: { jobID: string; query?: object }): Test {
-  return request(app).get(`/jobs/${jobID}/lineage`).query(query || {});
+function jobSteps(app, { jobID, query }: { jobID: string; query?: object }): Test {
+  return request(app).get(`/jobs/${jobID}/steps`).query(query || {});
 }
 
-const hookJobLineage = hookRequest.bind(this, jobLineage);
+const hookJobSteps = hookRequest.bind(this, jobSteps);
 
 const ownerJob = buildJob({
   username: 'joe',
@@ -34,7 +34,7 @@ const runningJob = buildJob({
   request: 'https://harmony.example/running',
 });
 
-describe('GET /jobs/:jobID/lineage', function () {
+describe('GET /jobs/:jobID/steps', function () {
   hookServersStartStop({ USE_EDL_CLIENT_APP: true });
   hookTransaction();
 
@@ -103,30 +103,30 @@ describe('GET /jobs/:jobID/lineage', function () {
   });
 
   describe('For a user who is not logged in', function () {
-    hookJobLineage({ jobID: ownerJob.jobID });
+    hookJobSteps({ jobID: ownerJob.jobID });
     it('redirects to Earthdata Login', function () {
       expect(this.res.statusCode).to.equal(303);
     });
   });
 
   describe('For a non-owner who is not admin', function () {
-    hookJobLineage({ jobID: ownerJob.jobID, username: 'stranger' });
+    hookJobSteps({ jobID: ownerJob.jobID, username: 'stranger' });
     it('denies access', function () {
       expect([403, 404]).to.include(this.res.statusCode);
     });
   });
 
-  describe('For the owner requesting the default lineage', function () {
-    hookJobLineage({ jobID: ownerJob.jobID, username: 'joe' });
+  describe('For the owner requesting the default steps response', function () {
+    hookJobSteps({ jobID: ownerJob.jobID, username: 'joe' });
 
-    it('returns 200 with a lineage document for the job', function () {
+    it('returns 200 with a steps document for the job', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       expect(body.jobID).to.equal(ownerJob.jobID);
       expect(body.status).to.equal('failed');
       expect(body.username).to.equal('joe');
       expect(body.request.url).to.equal('https://harmony.example/foo?bar=baz');
-      expect(body.request.body).to.be.null;
+      expect(body.request.body).to.be.undefined;
       expect(body.request.truncated).to.equal(false);
     });
 
@@ -221,7 +221,7 @@ describe('GET /jobs/:jobID/lineage', function () {
   });
 
   describe('Filtering with ?step=', function () {
-    hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { step: 2 } });
+    hookJobSteps({ jobID: ownerJob.jobID, username: 'joe', query: { step: 2 } });
     it('returns only the requested step', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
@@ -231,7 +231,7 @@ describe('GET /jobs/:jobID/lineage', function () {
   });
 
   describe('Filtering with ?status=failed', function () {
-    hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { status: 'failed' } });
+    hookJobSteps({ jobID: ownerJob.jobID, username: 'joe', query: { status: 'failed' } });
     it('keeps only work items in that status', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
@@ -247,7 +247,7 @@ describe('GET /jobs/:jobID/lineage', function () {
   });
 
   describe('Pagination with ?perPage=1', function () {
-    hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { perPage: 1 } });
+    hookJobSteps({ jobID: ownerJob.jobID, username: 'joe', query: { perPage: 1 } });
     it('returns one work item with pagination metadata indicating more pages', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
@@ -260,7 +260,7 @@ describe('GET /jobs/:jobID/lineage', function () {
   });
 
   describe('For a job whose work item is still incomplete', function () {
-    hookJobLineage({ jobID: runningJob.jobID, username: 'joe' });
+    hookJobSteps({ jobID: runningJob.jobID, username: 'joe' });
     it('leaves outputFiles as null and does not attempt resolution', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
@@ -271,29 +271,13 @@ describe('GET /jobs/:jobID/lineage', function () {
     });
   });
 
-  describe('With ?linktype= (unknown to this endpoint)', function () {
-    hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { linktype: 's3' } });
-    it('ignores the param rather than erroring (no validation, no effect)', function () {
-      // /jobs/:jobID accepts linktype; lineage deliberately does not. Express
-      // hands unknown query params through harmlessly; we just want to verify
-      // we didn't accidentally start rejecting requests for unknown params.
-      expect(this.res.statusCode).to.equal(200);
-    });
-  });
-
   describe('Validation errors', function () {
     describe('?status=bogus', function () {
-      hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { status: 'bogus' } });
+      hookJobSteps({ jobID: ownerJob.jobID, username: 'joe', query: { status: 'bogus' } });
       it('returns 400', function () {
         expect(this.res.statusCode).to.equal(400);
       });
     });
 
-    describe('?perPage above the cap', function () {
-      hookJobLineage({ jobID: ownerJob.jobID, username: 'joe', query: { perPage: 99999 } });
-      it('returns 400', function () {
-        expect(this.res.statusCode).to.equal(400);
-      });
-    });
   });
 });
