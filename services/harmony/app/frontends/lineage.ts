@@ -261,40 +261,39 @@ async function buildCmrCalls(
 }
 
 /**
- * Build the full lineage step list. The workItems passed in are already
+ * Build the full step list. The workItems passed in are already
  * the filtered, paginated set; this function groups them under their parent
  * step. Steps whose stepIndex was filtered out by ?step= are omitted.
  *
- * @param steps - all workflow steps for the job
+ * @param workflowSteps - all workflow steps for the job
  * @param workItems - the filtered, paginated page of work items to group
  * @param resolved - the catalog-URL-to-data-hrefs map from resolveAllCatalogs
  * @param q - the parsed lineage query, used to honor the ?step= filter
  * @returns the lineage steps with their work items and any CMR call details
  */
 async function buildSteps(
-  steps: WorkflowStep[],
+  workflowSteps: WorkflowStep[],
   workItems: WorkItem[],
   resolved: Map<string, string[]>,
   q: LineageQuery,
 ): Promise<LineageWorkflowStep[]> {
-  const byStep = new Map<number, WorkItem[]>();
-  for (const wi of workItems) {
-    const arr = byStep.get(wi.workflowStepIndex) ?? [];
+
+  // group the workitems by their stepindex (one for each service in the chain)
+  const byStepIndex = new Map<number, WorkItem[]>();
+   for (const wi of workItems) {
+    const arr = byStepIndex.get(wi.workflowStepIndex) ?? [];
     arr.push(wi);
-    byStep.set(wi.workflowStepIndex, arr);
+    byStepIndex.set(wi.workflowStepIndex, arr);
   }
 
   const result: LineageWorkflowStep[] = [];
-  for (const step of steps) {
+  for (const step of workflowSteps) {
     if (q.step !== undefined && step.stepIndex !== q.step) continue;
-    const stepWorkItems = byStep.get(step.stepIndex) ?? [];
+    const stepWorkItems = byStepIndex.get(step.stepIndex) ?? [];
 
     const lineageWorkflowStep: LineageWorkflowStep = {
-      stepIndex: step.stepIndex,
-      // Strip AWS ECR account and earthdata.nasa.gov host prefixes from the
-      // service image name (e.g. "123.dkr.ecr.us-west-2.amazonaws.com/foo:1.0"
-      // → "foo:1.0") so internal registry info isn't exposed.
       serviceID: sanitizeImage(step.serviceID),
+      stepIndex: step.stepIndex,
       workItemCount: step.workItemCount,
       workItems: stepWorkItems.map((wi) => buildWorkItem(wi, resolved)),
     };
@@ -315,9 +314,7 @@ async function buildSteps(
 
 /**
  * Express.js handler for GET /jobs/:jobID/lineage. Returns a JSON document
- * describing the job, its workflow steps, and the inputs/outputs of the
- * filtered + paginated work items. See docs/lineage-endpoint.md for the
- * response shape.
+ * describing the job, its workflow steps, and the inputs/outputs
  *
  * @param req - The request sent by the client
  * @param res - The response to send to the client
@@ -336,9 +333,6 @@ export async function getJobLineage(
 
     const steps = await getWorkflowStepsByJobId(db, jobID);
 
-    // Push every filter into the SQL WHERE clause so a million-WI job never
-    // round-trips a million rows. queryAll paginates with isLengthAware so
-    // we get total counts for pagination metadata.
     const workItemQuery: WorkItemQuery = {
       where: { jobID },
       orderBy: { field: 'id', value: 'asc' },
@@ -355,13 +349,9 @@ export async function getJobLineage(
     const resolvedCatalogs = await resolveAllCatalogs(workItems, frontendRoot);
     const lineageWorkflowSteps = await buildSteps(steps, workItems, resolvedCatalogs, q);
 
-    // The DataOperation is largely the same across steps (it gets passed
-    // step-to-step with minor mutations); surface it once at the response
-    // root using the first step as the canonical "what was asked of Harmony"
-    // view, projected down to user-facing fields.
-    const canonicalOperationStep = steps.find((s) => s.stepIndex === 1) ?? steps[0];
-    const operation = canonicalOperationStep
-      ? pickPublicOperationFields(canonicalOperationStep.operation)
+    const firstOperationStep = steps.find((s) => s.stepIndex === 1) ?? steps[0];
+    const operation = firstOperationStep
+      ? pickPublicOperationFields(firstOperationStep.operation)
       : null;
 
     const requestTruncated = !!job.request && job.request.length === TEXT_LIMIT;
@@ -372,8 +362,6 @@ export async function getJobLineage(
       message: job.message,
       username: job.username,
       numInputGranules: job.numInputGranules,
-      createdAt: job.createdAt,
-      updatedAt: job.updatedAt,
       request: {
         url: job.request,
         method: 'GET',

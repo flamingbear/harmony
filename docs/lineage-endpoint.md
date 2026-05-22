@@ -7,14 +7,13 @@ which service was called, what inputs it received, what outputs it produced,
 and enough of the original request to reason about (and eventually replay)
 the job.
 
-The primary use case is **debugging a failed service**: given a failed work
+A primary use case is **debugging a failed service**: given a failed work
 item, a developer wants the actual data file URL that was passed to that
 service.
 
 A secondary use case is **Parital Job Completion** — Allowing a user who had a
 workstep that may have failed the ability to find and get the output that did
 work.
-
 
 ## Route
 
@@ -23,9 +22,8 @@ GET /jobs/:jobID/lineage
 GET /admin/jobs/:jobID/lineage
 ```
 
-Auth: identical to `GET /jobs/:jobID` — `getJobIfAllowed(...)` in
-`services/harmony/app/util/job.ts`. Owner, admin, or holder of a shared-job
-access token may view.
+Auth: identical to jobs endpoint: `GET /jobs/:jobID` — `getJobIfAllowed(...)`
+Owner, admin, or holder of a shared-job access token may view.
 
 ## Query parameters
 
@@ -37,37 +35,10 @@ access token may view.
 | `page` | integer (default 1) | Page number for work items. |
 | `perPage` | integer (default 100, max 1000) | Page size for work items. |
 
-This endpoint deliberately does **not** accept a `linktype` parameter — see
-*Related: `linktype` on `/jobs/:jobID`* below.
-
-All filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
-work-item helper, so a job with a million work items never round-trips a
-million rows. Pagination metadata is included in the response and is the bound
-on expanding file location and fetching work-items cost.
-
-### Related: `linktype` on `/jobs/:jobID`
-
-The lineage endpoint always renders file URLs as `/service-results/...`
-permalinks (see *The `inputFiles` / `outputFiles` contract* below).
-If you need the raw `s3://` form instead, use the existing
-`/jobs/:jobID` endpoint, which accepts `?linktype=`. That parameter is
-**not** accepted here; passing it has no effect.
-
-For reference, `/jobs/:jobID?linktype=...` shapes the `links[].href` values
-it returns according to the following table:
-
-| Original href | `?linktype=s3` | otherwise (default) |
-|---|---|---|
-| `s3://bucket/public/path/file.nc4` | `s3://bucket/public/path/file.nc4` (verbatim) | `https://<frontendRoot>/service-results/bucket/public/path/file.nc4` |
-| `https://...` or `s?ftp://...` | passes through unchanged | passes through unchanged |
-| `s3://bucket/SOMETHING-NOT-public/...` | (handled by `createPublicPermalink`; throws today) | (same) |
-
-`/jobs/:jobID` uses the same `createPublicPermalink` helper this endpoint
-uses; the only difference is that this endpoint pins it to the default
-(permalink) branch and substitutes a `"<private file location>"` sentinel
-for hrefs `createPublicPermalink` rejects, rather than throwing. The
-intent is that lineage responses never leak internal S3 locations to
-clients regardless of what's in a service's STAC output.
+All query filters are pushed into the SQL `WHERE` clause via the existing
+`queryAll` work-item helper, so a job with a million work items never
+round-trips a million rows. Pagination metadata is included in the response and
+is the bound on expanding file locations and fetching work-items cost.
 
 
 ## Response shape
