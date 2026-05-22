@@ -48,8 +48,8 @@ interface LineageWorkItem {
 }
 
 interface LineageWorkflowStep {
-  stepIndex: number;
   serviceID: string;
+  stepIndex: number;
   workItemCount: number;
   cmr?: {
     endpoint: string;
@@ -365,8 +365,8 @@ export async function getJobLineage(
       request: {
         url: job.request,
         method: 'GET',
-        body: null as unknown,
-        bodyNote: 'POST request bodies are not yet persisted by Harmony.',
+        // body: null as unknown,
+        // bodyNote: 'POST request bodies are not yet persisted by Harmony.',
         truncated: requestTruncated,
       },
       operation,
