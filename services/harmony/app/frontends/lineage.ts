@@ -287,9 +287,12 @@ async function buildSteps(
   }
 
   const result: LineageWorkflowStep[] = [];
+  const filtering = q.status !== undefined || q.workItem !== undefined;
   for (const step of workflowSteps) {
     if (q.step !== undefined && step.stepIndex !== q.step) continue;
     const stepWorkItems = byStepIndex.get(step.stepIndex) ?? [];
+    // Don't show steps with no workitems
+    if (filtering && stepWorkItems.length === 0) continue;
 
     const lineageWorkflowStep: LineageWorkflowStep = {
       serviceID: sanitizeImage(step.serviceID),
@@ -365,8 +368,7 @@ export async function getJobLineage(
       request: {
         url: job.request,
         method: 'GET',
-        // body: null as unknown,
-        // bodyNote: 'POST request bodies are not yet persisted by Harmony.',
+        // body: tbd,
         truncated: requestTruncated,
       },
       operation,
