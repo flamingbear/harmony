@@ -135,92 +135,21 @@ URLs are signed via the same `createPublicPermalink` path that `/jobs/:jobID` us
 
 I have added a sentinal for the case where a file is created and it's somewhere we can't create a link to, not after a `/public` path in s3., that returns `<private file location>` but I'm not sure that's useful or needed.
 
-## Data sources
-
-| Field | Source |
-|-------|--------|
-| Job-level fields | `Job.byJobID` (`services/harmony/app/models/job.ts`) |
-| `request.url` | `jobs.request` column, stored at job creation; max 4096 chars. The `truncated` flag is set when `length === 4096`. |
-| `request.method` | Always `'GET'` today. The original method/body are not yet preserved — see the follow-up below. (`request.body` is not currently emitted.) |
-| Steps | `getWorkflowStepsByJobId` (`workflow-steps.ts:182`) — includes the `operation` JSON string per step (not exposed per-step; see `operation` row below). |
-| `serviceID` | `workflow_steps.serviceID`, run through `sanitizeImage` (`@harmony/util/string`) so AWS ECR account prefixes (`*.amazonaws.com/`) and `*.earthdata.nasa.gov/` hosts are stripped from the response. |
-| `operation` | One canonical block at the response root, derived from step 1's stored `workflow_steps.operation` JSON. Projected to an allow-list: `sources`, `format`, `subset`, `extendDimensions`, `temporal`, `concatenate`, `average`, `pixelSubset`, `extraArgs`. Internal fields (`accessToken`, `callback`, `stagingLocation`, `user`, `client`, `version`, `requestId`, `isSynchronous`, `$schema`) are dropped. The operation is largely identical across steps, so we surface it once instead of duplicating per step. |
-| Work items | `queryAll` (`work-item.ts:417`) with a `WorkItemQuery.where` clause containing `jobID` + any of `workflowStepIndex`/`status`/`id`. Filters run in SQL; results paginated with `isLengthAware` so total counts are accurate. |
-| `pagination` | The `ILengthAwarePagination` object returned by `queryAll` (knex-paginate). |
-| `cmr.params` | For each query-cmr work item, one S3 GET of `s3UrlForStoredQueryParams(scrollID)` (`cmr.ts:1315`) |
-| `cmr.endpoint` | `env.cmrEndpoint` |
-| `inputFiles` / `outputFiles` for completed WIs | For each completed WI, the input is the single catalog at `wi.stacCatalogLocation`; the outputs are enumerated from the WI's outputs directory via `getStacCatalogs` (`batch-catalogs.json` if present — e.g. query-cmr — else listing `catalog*.json`). Each unique catalog URL is read once with `readCatalogItems` + `getCatalogLinks` (`services/harmony/app/util/stac.ts`) in parallel via `Promise.all`, and hrefs run through `createPublicPermalink` (`app/frontends/service-results.ts:35`) — the same signing path `/jobs/:jobID` uses. Dedupe across the input/output boundary means step N+1's `stacCatalogLocation` reading the same catalog file as step N's outputs costs a single GET. Hrefs that can't be signed (e.g. internal S3 URLs outside `/public/`) are replaced with the sentinel `"<private file location>"` rather than dropped, preserving the cardinality of the list. |
-
 ## Redactions
 
 I don't know for sure how important the `operation` block is for this service. But it is built by allow-list — only `sources`, `format`, `subset`, `extendDimensions`, `temporal`, `concatenate`, `average`, `pixelSubset`, and `extraArgs` are forwarded. Everything else, including the encrypted `accessToken` and internals (`callback`, `stagingLocation`, `requestId`, etc.), are dropped.
 
-## Known limitations
+## Open Questions / limitations
 
-These are intentional gaps in v1. Each is surfaced honestly in the response
-(via `truncated`, or by being null) rather than hidden.
+1. **POST request body is not persisted.**
+   - Should we save the entire POSTed body to s3 when we exceed the URL limit of 4096 that can be stored in the database?  I assume the workflow-ui, presents even less than that and maybe just the GET encoded full (up to 4096) will be pretty good? good enough?
+   - Where would that be writen? `s3://{artifactBucket}/{jobID}/request.json`.
 
-1. **POST request body is not persisted.** Harmony stores the request URL
-   but not the JSON or form body of POSTs, so a POST's body cannot be shown
-   and `method` always reads `'GET'`. The follow-up below addresses
-   this.
-2. **GET URL is capped at 4096 chars on save.** The `jobs.request` column is
-   varchar; `Job.save()` truncates beyond 4096. URLs longer than that are
-   already lost by the time the steps endpoint runs. The `truncated` flag
-   reports when this happened.
-3. **Failed work items often have no output catalog.** When a service fails
-   before writing its STAC output, the deterministic S3 catalog path will
-   return 404. The handler swallows that and reports `outputFiles: []` for
-   the failed WI.
-4. **Per-work-item error messages and logs are not in the response.** The
-   `work_items` table persists `message_category` but not the `message` text
-   itself — the message is only set transiently during update processing
-   (`work-item-updates.ts:1068`) and routed to `job_messages` and logs.
-   Logs themselves are not exposed: the existing `/logs/:jobID/:id` endpoint
-   is admin-gated (`workflow-ui.ts:779`), and the artifact-bucket S3 path is
-   not under `/public/`, so signing it would always produce a `"<private file
-   location>"` sentinel. Admins debugging a WI can hit `/logs/:jobID/:id`
-   directly using the `id` surfaced on each work item in this response.
-5. **Retried work items lose their prior attempts.** Harmony updates the
-   same `work_items` row across retries; only the latest attempt's
-   `startedAt`/`duration`/`message` are visible. The steps response reports the
-   `retryCount` so callers know retries happened.
-6. **Batched / aggregated steps are not distinguishable from this endpoint.**
-   When a service step uses batching or output aggregation, the relationship
-   between input and output files is not 1:1 — a single work item may consume
-   many upstream catalogs. The response does not expose this; callers cannot
-   tell from the steps endpoint whether a given step batches or aggregates.
-   If needed, query `workflow_steps` directly for the `isBatched` /
-   `hasAggregatedOutput` flags.
+2. Shapefiles? IDK.
+   - Would those be available to include if uploaded? Would it be useful?
 
 ## Cost
 
-Per request: one DB read for the job, one for the workflow steps, one
-paginated SQL query for the work items (bounded by `perPage`, default 100),
-plus one S3 GET per query-cmr work item on the current page for the CMR
-`serializedQuery` (typically 1 per job).
+Per request: one DB read for the job, one for the workflow steps, one paginated SQL query for the work items (bounded by `perPage`, default 100), plus one S3 GET per query-cmr work item on the current page for the CMR `serializedQuery`
 
-STAC resolution: the handler builds the set of unique catalog URLs across
-the *completed* WIs on the page (input + output sides, deduplicated) and
-resolves them in parallel via `Promise.all`. For a typical chain where
-each step's output ≡ next step's input, this is `S` catalog reads for
-`S` steps' worth of WIs on the page, plus `~1` STAC item GET per catalog.
-Incomplete WIs are skipped, so a running job's steps response costs essentially
-nothing in S3 reads. `perPage` (default 100, max 1000) bounds the worst
-case independently of total job size.
-
-## Follow-up work: persist POST request bodies
-
-Add a write at job-creation time that uploads the raw POST body to
-`s3://{artifactBucket}/{jobID}/request.json`. The steps handler then
-attempts to read this object and, when present, populates
-`request.body`. Scope (per the prior design discussion):
-
-- POST JSON bodies only. GET URLs continue to come from `jobs.request`.
-- TEXT migration on `jobs.request` is **out of scope**. The 4096 cap stays.
-- Shapefile preservation (copying from `temp-user-uploads/` to a persistent
-  location) is out of scope.
-
-This is a separate PR. When implemented, the handler will populate
-`request.method`/`request.body` from `request.json` when present and fall back
-to the truncated `jobs.request` URL (with `method: 'GET'`) otherwise.
+STAC resolution: the handler should build the set of unique catalog URLs across the *completed* WIs on the page since the input and output sides depend on which step we're talking about.  `perPage` (default 100, max 1000) bounds the worst case independently of total job size.
