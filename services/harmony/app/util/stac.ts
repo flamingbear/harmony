@@ -1,3 +1,4 @@
+import env from './env';
 import { objectStoreForProtocol } from './object-store';
 import { resolve } from './url';
 import JobLink from '../models/job-link';
@@ -118,6 +119,39 @@ export async function readCatalogItems(catalogUrl: string): Promise<StacItem[]> 
   }
 
   return items;
+}
+
+/**
+ * Get the full s3 URLs of every STAC catalog file in a work item's outputs
+ * directory. Mirrors `_getStacCatalogs` in `services/service-runner` so the
+ * steps endpoint can enumerate outputs the same way the orchestrator does.
+ *
+ * Services with a `batch-catalogs.json` index (e.g. query-cmr) return its
+ * listed filenames; others are discovered by listing for `catalog*.json` and
+ * sorting by index (a bare `catalog.json` is treated as index 0).
+ *
+ * @param dir - the s3 outputs directory URL, e.g. `s3://bucket/{jobID}/{wi}/outputs/`
+ * @returns the full s3 URLs of each catalog file found in `dir`
+ */
+export async function getStacCatalogs(dir: string): Promise<string[]> {
+  const s3 = objectStoreForProtocol('s3');
+  const batchCatalogsJsonUrl = `${dir}batch-catalogs.json`;
+  if (await s3.objectExists(batchCatalogsJsonUrl)) {
+    const batchCatalogs = await s3.getObjectJson(batchCatalogsJsonUrl) as string[];
+    return batchCatalogs.map((filename) => `${dir}${filename}`);
+  }
+
+  // Fall back to listing the dir for catalog*.json (including a bare
+  // catalog.json), sorted by numeric index.
+  const urls = (await s3.listObjectKeys(dir))
+    .filter((fileKey) => fileKey.match(/catalog\d*\.json$/))
+    .map((fileKey) => `s3://${env.artifactBucket}/${fileKey}`);
+  const fileNumRegex = /catalog(\d+)\.json$/;
+  return urls.sort((a, b) => {
+    const aNum = Number(a.match(fileNumRegex)?.[1] ?? 0);
+    const bNum = Number(b.match(fileNumRegex)?.[1] ?? 0);
+    return aNum - bNum;
+  });
 }
 
 /**

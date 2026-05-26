@@ -17,7 +17,7 @@ import env from '../util/env';
 import { RequestValidationError } from '../util/errors';
 import { getJobIfAllowed } from '../util/job';
 import { defaultObjectStore } from '../util/object-store';
-import { getCatalogLinks, readCatalogItems } from '../util/stac';
+import { getCatalogLinks, getStacCatalogs, readCatalogItems } from '../util/stac';
 import { getRequestRoot } from '../util/url';
 
 const DEFAULT_PER_PAGE = 100;
@@ -178,59 +178,91 @@ function safePublicLink(href: string, frontendRoot: string): string {
   }
 }
 
+interface ResolvedCatalogs {
+  // public-facing data hrefs per catalog file URL (input catalogs + each
+  // catalog file within a WI's outputs directory)
+  catalogHrefs: Map<string, string[]>;
+  // for each completed WI, the list of catalog file URLs that make up its
+  // outputs (enumerated via getStacCatalogs). Absence from this map means
+  // the WI was incomplete and outputs should surface as null.
+  wiOutputCatalogs: Map<number, string[]>;
+}
+
 /**
- * Resolve every unique catalog URL referenced by completed work items.
+ * For every completed work item, enumerate its output catalog files (via
+ * getStacCatalogs — `batch-catalogs.json` if present, else listing
+ * `catalog*.json`), then resolve each unique catalog URL (inputs + outputs)
+ * to public-facing data hrefs in parallel.
  *
  * @param workItems - the page of work items whose catalogs should be resolved
- * @param frontendRoot - The root URL to use when producing Harmony permalinks
- * @returns a map from catalog URL to its public-facing data hrefs (empty array
- *   when the catalog is missing or has no data assets). Catalog URLs NOT in the
- *   map belong to incomplete WIs; the handler treats those as `files: null`.
+ * @param frontendRoot - the root URL to use when producing Harmony permalinks
+ * @returns the per-catalog hrefs map and per-WI output catalog list (see
+ *   ResolvedCatalogs)
  */
 async function resolveAllCatalogs(
   workItems: WorkItem[],
   frontendRoot: string,
-): Promise<Map<string, string[]>> {
-  const urls = new Set<string>();
-  for (const wi of workItems) {
-    if (!COMPLETED_WORK_ITEM_STATUSES.includes(wi.status)) continue;
-    if (wi.stacCatalogLocation) urls.add(wi.stacCatalogLocation);
-    urls.add(getStacLocation({ id: wi.id, jobID: wi.jobID }, 'catalog.json'));
+): Promise<ResolvedCatalogs> {
+  const completed = workItems.filter((wi) => COMPLETED_WORK_ITEM_STATUSES.includes(wi.status));
+
+  // Enumerate each WI's output catalog files in parallel.
+  const wiOutputCatalogs = new Map<number, string[]>();
+  await Promise.all(completed.map(async (wi) => {
+    const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
+    try {
+      wiOutputCatalogs.set(wi.id, await getStacCatalogs(outputDir));
+    } catch {
+      // listing failed (e.g. dir doesn't exist yet); treat as no outputs
+      wiOutputCatalogs.set(wi.id, []);
+    }
+  }));
+
+  // Collect every unique catalog file URL we need to read: each completed WI's
+  // input (stacCatalogLocation) plus every catalog file in its outputs.
+  // Dedupe handles the step N output ≡ step N+1 input overlap.
+  const allUrls = new Set<string>();
+  for (const wi of completed) {
+    if (wi.stacCatalogLocation) allUrls.add(wi.stacCatalogLocation);
+    for (const url of wiOutputCatalogs.get(wi.id) ?? []) allUrls.add(url);
   }
-  const entries = await Promise.all(
-    Array.from(urls).map(async (url) => {
-      const rawHrefs = await resolveDataHrefs(url);
-      const publicHrefs = rawHrefs.map((h) => safePublicLink(h, frontendRoot));
-      return [url, publicHrefs] as const;
-    }),
-  );
-  return new Map(entries);
+
+  const catalogHrefs = new Map<string, string[]>();
+  await Promise.all(Array.from(allUrls).map(async (url) => {
+    const rawHrefs = await resolveDataHrefs(url);
+    catalogHrefs.set(url, rawHrefs.map((h) => safePublicLink(h, frontendRoot)));
+  }));
+
+  return { catalogHrefs, wiOutputCatalogs };
 }
 
 /**
  * Build the work item portion of the response. inputFiles / outputFiles are
- * populated from the precomputed `resolved` map; URLs missing from the map
- * (because the WI was incomplete when resolveAllCatalogs ran) surface as
- * `null`. WIs that never have a STAC input (e.g. query-cmr step 1) always
- * report `inputFiles: null`.
+ * populated from the precomputed `resolved` maps; a WI absent from
+ * `wiOutputCatalogs` (because it was incomplete when resolveAllCatalogs ran)
+ * surfaces as `outputFiles: null`. WIs that never have a STAC input (e.g.
+ * query-cmr step 1) always report `inputFiles: null`.
  *
  * @param wi - the work item to serialize
- * @param resolved - the catalog-URL-to-data-hrefs map from resolveAllCatalogs
+ * @param resolved - the catalog hrefs map + per-WI output catalog list
  * @returns the work item shaped for the steps response
  */
 function buildWorkItem(
   wi: WorkItem,
-  resolved: Map<string, string[]>,
+  resolved: ResolvedCatalogs,
 ): StepWorkItem {
-  const outputCatalog = getStacLocation({ id: wi.id, jobID: wi.jobID }, 'catalog.json');
+  const { catalogHrefs, wiOutputCatalogs } = resolved;
+  const outputCatalogs = wiOutputCatalogs.get(wi.id);
+  const outputFiles = outputCatalogs === undefined
+    ? null
+    : outputCatalogs.flatMap((url) => catalogHrefs.get(url) ?? []);
   return {
     id: wi.id,
     status: wi.status,
     retryCount: wi.retryCount,
     inputFiles: wi.stacCatalogLocation
-      ? (resolved.get(wi.stacCatalogLocation) ?? null)
+      ? (catalogHrefs.get(wi.stacCatalogLocation) ?? null)
       : null,
-    outputFiles: resolved.get(outputCatalog) ?? null,
+    outputFiles,
   };
 }
 
@@ -267,14 +299,14 @@ async function buildCmrCalls(
  *
  * @param workflowSteps - all workflow steps for the job
  * @param workItems - the filtered, paginated page of work items to group
- * @param resolved - the catalog-URL-to-data-hrefs map from resolveAllCatalogs
+ * @param resolved - resolved-catalog data from resolveAllCatalogs
  * @param q - the parsed steps query, used to honor the ?step= filter
  * @returns the steps with their work items and any CMR call details
  */
 async function buildSteps(
   workflowSteps: WorkflowStep[],
   workItems: WorkItem[],
-  resolved: Map<string, string[]>,
+  resolved: ResolvedCatalogs,
   q: StepsQuery,
 ): Promise<JobStep[]> {
 
