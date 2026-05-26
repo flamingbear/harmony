@@ -2,20 +2,13 @@
 
 ## Purpose
 
-Return, in JSON, the complete chain of service invocations for a Harmony job:
-which service was called, what inputs it received, what outputs it produced,
-and enough of the original request to reason about (and eventually replay)
-the job.
+Return, in JSON, the complete chain of service invocations for a Harmony job: which service and version was called, what inputs it received, what outputs it produced, and enough of the original request to reason about and replay the job.
 
-A primary use case is **debugging a failed service**: given a failed work
-item, a developer wants the actual data file URL that was passed to that
-service.
+A primary use case is **debugging a failed service**: given a failed work item, a developer wants the actual data file URL that was passed to that service.
 
-A secondary use case is **Parital Job Completion** — Allowing a user who had a
-workstep that may have failed the ability to find and get the output that did
-work.
+A secondary use case is **Parital Job Completion** — Allowing a user who had a workstep that may have failed the ability to find and get the output that did work.
 
-Is there a third usecase?
+Is there a third usecase? Replaying failed jobs?
 
 
 ## Route
@@ -30,18 +23,15 @@ Owner, admin, or holder of a shared-job access token may view.
 
 ## Query parameters
 
-| Param | Values | Effect |
-|-------|--------|--------|
-| `step` | integer | Limit to one service container of the job service chain (filters work items by `workflowStepIndex`) |
-| `status` | one of the `WorkItemStatus` values | Limit to work items in a single status. |
-| `workItem` | integer | Limit to a single work item by id. |
-| `page` | integer (default 1) | Page number for work items. |
-| `perPage` | integer (default 100, max 1000) | Page size for work items. |
+| Param      | Values                             | Effect                                                                                                       |
+|------------|------------------------------------|--------------------------------------------------------------------------------------------------------------|
+| `step`     | integer                            | Limit to one step the job service chain (filters on `workflowStepIndex`) e.g. just net2cog steps             |
+| `status`   | one of the `WorkItemStatus` values | Limit to work items by status. [`ready`, `queued`, `running`, `successful`, `failed`, `canceled`, `warning`] |
+| `workItem` | integer                            | Limit to a single work item by id.                                                                           |
+| `page`     | integer (default 1)                | Page number for work items.                                                                                  |
+| `perPage`  | integer (default 100, max 1000)    | Page size for work items.                                                                                    |
 
-All query filters are pushed into the SQL `WHERE` clause via the existing
-`queryAll` work-item helper, so a job with a million work items never
-round-trips a million rows. Pagination metadata is included in the response and
-is the bound on expanding file locations and fetching work-items cost.
+Query filters are pushed into the SQL `WHERE` clause via the existing `queryAll` work-item helper, so a job with a million work items never round-trips a million rows. Pagination metadata is included in the response and is the bound on expanding file locations from s3 and fetching work-items.
 
 
 ## Response shape
@@ -49,10 +39,10 @@ is the bound on expanding file locations and fetching work-items cost.
 ```json
 {
   "jobID": "<uuid>",
-  "status": "failed",
-  "progress": 80,
-  "message": "...",
-  "username": "esdis username",
+  "status": "complete_with_errors",
+  "progress": 100,
+  "message": "The job has completed with errors. See the errors field for more details",
+  "username": "esdis-username",
   "numInputGranules": 5,
 
   "request": {
@@ -84,7 +74,11 @@ is the bound on expanding file locations and fetching work-items cost.
         "calls": [
           {
             "workItemId": 9491393,
-            "params": { /* contents of s3://{stagingBucket}/SearchParams/<scrollID>/serializedQuery */ }
+            "params": { /* contents of s3://{stagingBucket}/SearchParams/<scrollID>/serializedQuery */
+              "temporal": "2015-03-31T17:06:00.000Z,2015-03-31T17:10:00.000Z",
+              "bounding_box": "5.0196,36.73504,7.91089,43.2472",
+              "collection_concept_id": "C1268429762-EEDTEST"
+            }
           }
         ]
       },
@@ -125,22 +119,21 @@ is the bound on expanding file locations and fetching work-items cost.
 }
 ```
 
-### The `inputFiles` / `outputFiles` contract
+### `inputFiles` / `outputFiles`
 
 Each work item carries two flat fields, `inputFiles` and `outputFiles`,
 each one of three values:
 
 | Value | What it means |
-|---|---|
-| `null` | Nothing to show. For `outputFiles`: the work item has not completed yet (its output catalog doesn't exist). For `inputFiles`: the work item has not completed yet, **or** the work item has no STAC input by design (e.g. step 1 query-cmr WIs).|
+|-------|---------------|
+| `null` | Nothing to show. For `outputFiles`: the work item has not completed yet (its output catalog doesn't exist). For `inputFiles`: the work item has not completed yet. |
 | `[]` | The work item completed but the relevant catalog was missing, unreadable, or had no STAC items with `role: 'data'`. |
-| `["https://harmony.../service-results/...", "<private file location>", ...]` | Resolved data hrefs. |
+| `["https://harmony.../service-results/.../granule_xyz.nc4", ...]` | Resolved data hrefs. |
 
-The handler resolves catalogs only for WIs in `COMPLETED_WORK_ITEM_STATUSES`
-(`successful`, `failed`, `canceled`, `warning`). Incomplete WIs have both
-`inputFiles` and `outputFiles` set to `null`.
-
+The handler resolves catalogs only for WIs in `COMPLETED_WORK_ITEM_STATUSES` (`successful`, `failed`, `canceled`, `warning`). Incomplete WIs have both `inputFiles` and `outputFiles` set to `null`.
 URLs are signed via the same `createPublicPermalink` path that `/jobs/:jobID` uses for `links` hrefs.
+
+I have added a sentinal for the case where a file is created and it's somewhere we can't create a link to, not after a `/public` path in s3., that returns `<private file location>` but I'm not sure that's useful or needed.
 
 ## Data sources
 
@@ -160,13 +153,7 @@ URLs are signed via the same `createPublicPermalink` path that `/jobs/:jobID` us
 
 ## Redactions
 
-The `operation` block is built by allow-list — only `sources`, `format`,
-`subset`, `extendDimensions`, `temporal`, `concatenate`, `average`,
-`pixelSubset`, and `extraArgs` are forwarded. Everything else, including
-the encrypted `accessToken` (`data-operation.ts:886`) and internal
-plumbing (`callback`, `stagingLocation`, `requestId`, etc.), is dropped.
-Allow-listing also means newly added operation fields stay private by
-default unless deliberately added to the public set.
+I don't know for sure how important the `operation` block is for this service. But it is built by allow-list — only `sources`, `format`, `subset`, `extendDimensions`, `temporal`, `concatenate`, `average`, `pixelSubset`, and `extraArgs` are forwarded. Everything else, including the encrypted `accessToken` and internals (`callback`, `stagingLocation`, `requestId`, etc.), are dropped.
 
 ## Known limitations
 
