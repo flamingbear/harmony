@@ -10,6 +10,7 @@ All of the public endpoints for Harmony users other than the OGC Coverages, EDR,
 | /docs                  | These documentation pages                                                                         |
 | /docs/api              | The Swagger documentation for the OGC Coverages API                                               |
 | /jobs                  | [The jobs API for getting job status, pausing/continuing/canceling jobs](#jobs-details)           |
+| /jobs/steps            | [The introspection service for understanding a jobs steps](#jobs-steps)           |
 | /stac                  | [The API for retrieving STAC catalog and catalog items for processed data](#stac-details)         |
 | /staging-bucket-policy | [The policy generator for external (user) bucket storage](#user-owned-buckets-for-harmony-output) |
 | /versions              | [Returns JSON indicating the image and tag each deployed service is running](#versions-details)   |

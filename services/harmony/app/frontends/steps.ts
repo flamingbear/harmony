@@ -17,7 +17,7 @@ import env from '../util/env';
 import { RequestValidationError } from '../util/errors';
 import { getJobIfAllowed } from '../util/job';
 import { defaultObjectStore } from '../util/object-store';
-import { getCatalogLinks, getStacCatalogs, readCatalogItems } from '../util/stac';
+import { getCatalogLinks, readCatalogItems } from '../util/stac';
 import { getRequestRoot } from '../util/url';
 
 const DEFAULT_PER_PAGE = 100;
@@ -189,10 +189,32 @@ interface ResolvedCatalogs {
 }
 
 /**
- * For every completed work item, enumerate its output catalog files (via
- * getStacCatalogs — `batch-catalogs.json` if present, else listing
- * `catalog*.json`), then resolve each unique catalog URL (inputs + outputs)
- * to public-facing data hrefs in parallel.
+ * Read query-cmr's `batch-catalogs.json` (the JSON array of catalog filenames
+ * it writes alongside its catalogN.json output catalogs) and return absolute
+ * URLs to each. Returns [] when the file isn't readable — e.g. the query-cmr
+ * WI failed before writing it, or produced no granules.
+ *
+ * Only meaningful for query-cmr WIs; regular services write a top-level
+ * `catalog.json` instead of `batch-catalogs.json`.
+ *
+ * @param outputDir - the WI's outputs directory URL
+ * @returns absolute URLs to each catalogN.json file
+ */
+async function readBatchCatalogs(outputDir: string): Promise<string[]> {
+  try {
+    const filenames = await defaultObjectStore().getObjectJson(
+      `${outputDir}batch-catalogs.json`,
+    ) as string[];
+    return filenames.map((f) => `${outputDir}${f}`);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * For every completed work item, determine its output catalog file URLs, then
+ * resolve each unique catalog URL (inputs + outputs) to public-facing data
+ * hrefs in parallel.
  *
  * @param workItems - the page of work items whose catalogs should be resolved
  * @param frontendRoot - the root URL to use when producing Harmony permalinks
@@ -205,15 +227,18 @@ async function resolveAllCatalogs(
 ): Promise<ResolvedCatalogs> {
   const completed = workItems.filter((wi) => COMPLETED_WORK_ITEM_STATUSES.includes(wi.status));
 
-  // Enumerate each WI's output catalog files in parallel.
+  // Determine each completed WI's output catalog file URLs.
+  //   - query-cmr WIs (wi.scrollID is set) write multiple catalogN.json files
+  //     indexed by batch-catalogs.json, with no top-level catalog.json.
+  //   - All other services write a single top-level catalog.json that fans
+  //     out to items via rel=item links.
   const wiOutputCatalogs = new Map<number, string[]>();
   await Promise.all(completed.map(async (wi) => {
-    const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
-    try {
-      wiOutputCatalogs.set(wi.id, await getStacCatalogs(outputDir));
-    } catch {
-      // listing failed (e.g. dir doesn't exist yet); treat as no outputs
-      wiOutputCatalogs.set(wi.id, []);
+    if (wi.scrollID) {
+      const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
+      wiOutputCatalogs.set(wi.id, await readBatchCatalogs(outputDir));
+    } else {
+      wiOutputCatalogs.set(wi.id, [getStacLocation({ id: wi.id, jobID: wi.jobID }, 'catalog.json')]);
     }
   }));
 
