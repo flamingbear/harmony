@@ -179,20 +179,18 @@ function safePublicLink(href: string, frontendRoot: string): string {
 }
 
 interface ResolvedCatalogs {
-  // public-facing data hrefs per catalog file URL (input catalogs + each
-  // catalog file within a WI's outputs directory)
+  // Map of local catalog.json -> Array of safeLinks to file.
   catalogHrefs: Map<string, string[]>;
-  // for each completed WI, the list of catalog file URLs that make up its
-  // outputs (enumerated via getStacCatalogs). Absence from this map means
-  // the WI was incomplete and outputs should surface as null.
+  // Map of workflow step index to Array of catalog.json files
+  // only query-cmr's step will have more than one file.
   wiOutputCatalogs: Map<number, string[]>;
 }
 
 /**
  * Read query-cmr's `batch-catalogs.json` (the JSON array of catalog filenames
  * it writes alongside its catalogN.json output catalogs) and return absolute
- * URLs to each. Returns [] when the file isn't readable — e.g. the query-cmr
- * WI failed before writing it, or produced no granules.
+ * URLs to each. Returns [] when the file isn't readable or produced no
+ * granules.
  *
  * Only meaningful for query-cmr WIs; regular services write a top-level
  * `catalog.json` instead of `batch-catalogs.json`.
@@ -214,26 +212,25 @@ async function readBatchCatalogs(outputDir: string): Promise<string[]> {
 /**
  * For every completed work item, determine its output catalog file URLs, then
  * resolve each unique catalog URL (inputs + outputs) to public-facing data
- * hrefs in parallel.
+ * hrefs.
  *
  * @param workItems - the page of work items whose catalogs should be resolved
  * @param frontendRoot - the root URL to use when producing Harmony permalinks
- * @returns the per-catalog hrefs map and per-WI output catalog list (see
+ * @returns the per-catalog ->  hrefs map and per-WI output -> catalog list (see
  *   ResolvedCatalogs)
  */
 async function resolveAllCatalogs(
   workItems: WorkItem[],
   frontendRoot: string,
 ): Promise<ResolvedCatalogs> {
-  const completed = workItems.filter((wi) => COMPLETED_WORK_ITEM_STATUSES.includes(wi.status));
+  const completed_workitems = workItems.filter((wi) => COMPLETED_WORK_ITEM_STATUSES.includes(wi.status));
 
   // Determine each completed WI's output catalog file URLs.
   //   - query-cmr WIs (wi.scrollID is set) write multiple catalogN.json files
-  //     indexed by batch-catalogs.json, with no top-level catalog.json.
-  //   - All other services write a single top-level catalog.json that fans
-  //     out to items via rel=item links.
+  //     indexed by batch-catalogs.json
+  //   - All other services write a single top-level catalog.json
   const wiOutputCatalogs = new Map<number, string[]>();
-  await Promise.all(completed.map(async (wi) => {
+  await Promise.all(completed_workitems.map(async (wi) => {
     if (wi.scrollID) {
       const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
       wiOutputCatalogs.set(wi.id, await readBatchCatalogs(outputDir));
@@ -242,11 +239,11 @@ async function resolveAllCatalogs(
     }
   }));
 
-  // Collect every unique catalog file URL we need to read: each completed WI's
+  // Collect every unique catalog file URL: each completed WI's
   // input (stacCatalogLocation) plus every catalog file in its outputs.
-  // Dedupe handles the step N output ≡ step N+1 input overlap.
+  // Handles the step N output == step N+1 input overlap.
   const allUrls = new Set<string>();
-  for (const wi of completed) {
+  for (const wi of completed_workitems) {
     if (wi.stacCatalogLocation) allUrls.add(wi.stacCatalogLocation);
     for (const url of wiOutputCatalogs.get(wi.id) ?? []) allUrls.add(url);
   }
