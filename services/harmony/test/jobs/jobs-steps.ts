@@ -4,9 +4,10 @@ import request, { Test } from 'supertest';
 
 import { JobStatus } from '../../app/models/job';
 import { WorkItemStatus } from '../../app/models/work-item-interface';
+import { auth } from '../helpers/auth';
 import { hookTransaction } from '../helpers/db';
 import { hookRequest } from '../helpers/hooks';
-import { buildJob } from '../helpers/jobs';
+import { adminUsername, buildJob } from '../helpers/jobs';
 import hookServersStartStop from '../helpers/servers';
 import { buildWorkItem } from '../helpers/work-items';
 import { buildWorkflowStep, validOperation } from '../helpers/workflow-steps';
@@ -19,7 +20,17 @@ function jobSteps(app, { jobID, query }: { jobID: string; query?: object }): Tes
   return request(app).get(`/jobs/${jobID}/steps`).query(query || {});
 }
 
+/**
+ * Issue a request to the admin steps endpoint.
+ */
+function adminJobSteps(app, { jobID, query }: { jobID: string; query?: object }): Test {
+  return request(app).get(`/admin/jobs/${jobID}/steps`).query(query || {});
+}
+
 const hookJobSteps = hookRequest.bind(this, jobSteps);
+const hookAdminJobSteps = hookRequest.bind(this, adminJobSteps);
+
+let wi2Id: number;
 
 const ownerJob = buildJob({
   username: 'joe',
@@ -40,10 +51,7 @@ describe('GET /jobs/:jobID/steps', function () {
 
   before(async function () {
     await ownerJob.save(this.trx);
-    // Step 1: query-cmr with a single successful work item (scrollID indicates
-    // query-cmr). The stored serviceID intentionally carries an ECR prefix so
-    // tests verify that sanitizeImage runs on the response (the assertion
-    // below expects the stripped form "harmonyservices/query-cmr:latest").
+    // Step 1: query-cmr with a single successful work item
     const step1 = buildWorkflowStep({
       jobID: ownerJob.jobID,
       stepIndex: 1,
@@ -78,6 +86,7 @@ describe('GET /jobs/:jobID/steps', function () {
       stacCatalogLocation: `s3://artifacts/${ownerJob.jobID}/1/outputs/catalog.json`,
     });
     await wi2.save(this.trx);
+    wi2Id = wi2.id;
 
     // A second job that's still running, with a single READY work item — used
     // to verify that incomplete WIs surface as files: null and that no S3
@@ -268,6 +277,72 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(wi.status).to.equal('ready');
       expect(wi.outputFiles).to.equal(null);
       expect(wi.inputFiles).to.equal(null);
+    });
+  });
+
+  describe('For an admin user fetching another user\'s job via /admin/jobs/:jobID/steps', function () {
+    hookAdminJobSteps({ jobID: ownerJob.jobID, username: adminUsername });
+    it('returns 200 with the job\'s steps', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      expect(body.jobID).to.equal(ownerJob.jobID);
+      expect(body.steps).to.have.lengthOf(2);
+    });
+  });
+
+  describe('For a jobID that does not exist', function () {
+    hookJobSteps({
+      jobID: '00000000-0000-4000-8000-000000000000',
+      username: 'joe',
+    });
+    it('returns 404', function () {
+      expect(this.res.statusCode).to.equal(404);
+    });
+  });
+
+  describe('Filtering with ?step= for an unknown step index', function () {
+    hookJobSteps({ jobID: ownerJob.jobID, username: 'joe', query: { step: 99 } });
+    it('returns 200 with an empty steps array', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      expect(body.steps).to.deep.equal([]);
+    });
+  });
+
+  describe('Filtering with ?workItem=<id>', function () {
+    // Custom before because hookJobSteps captures `query` at describe-load
+    // time, but wi2Id is only set by the outer `before` (after save).
+    before(async function () {
+      this.res = await jobSteps(
+        this.frontend,
+        { jobID: ownerJob.jobID, query: { workItem: wi2Id } },
+      ).use(auth({ username: 'joe' }));
+    });
+    after(function () { delete this.res; });
+
+    it('returns only the requested work item, in its parent step', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      // The workItem filter + drop-empty-when-filtering means only step 2
+      // surfaces, with exactly the targeted work item.
+      expect(body.steps).to.have.lengthOf(1);
+      expect(body.steps[0].stepIndex).to.equal(2);
+      expect(body.steps[0].workItems).to.have.lengthOf(1);
+      expect(body.steps[0].workItems[0].id).to.equal(wi2Id);
+    });
+  });
+
+  describe('Pagination — page 2 with ?perPage=1', function () {
+    hookJobSteps({ jobID: ownerJob.jobID, username: 'joe', query: { perPage: 1, page: 2 } });
+    it('returns the second page of work items with currentPage=2', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      expect(body.pagination.currentPage).to.equal(2);
+      expect(body.pagination.perPage).to.equal(1);
+      expect(body.pagination.total).to.equal(2);
+      expect(body.pagination.lastPage).to.equal(2);
+      const totalReturnedWIs = body.steps.reduce((acc, s) => acc + s.workItems.length, 0);
+      expect(totalReturnedWIs).to.equal(1);
     });
   });
 
