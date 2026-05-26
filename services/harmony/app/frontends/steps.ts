@@ -417,6 +417,7 @@ export async function getJobSteps(
     const requestTruncated = !!job.request && job.request.length === TEXT_LIMIT;
     const responseBody = {
       jobID: job.jobID,
+      serviceName: job.service_name,
       status: job.status,
       progress: job.progress,
       message: job.message,

@@ -39,6 +39,7 @@ Query filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
 ```json
 {
   "jobID": "<uuid>",
+  "serviceName": "service name from service-{ENV}.yml",
   "status": "complete_with_errors",
   "progress": 100,
   "message": "The job has completed with errors. See the errors field for more details",
@@ -74,7 +75,7 @@ Query filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
         "calls": [
           {
             "workItemId": 9491393,
-            "params": { /* contents of s3://{stagingBucket}/SearchParams/<scrollID>/serializedQuery */
+            "params": { /* contents of s3://<stagingBucket>/SearchParams/<scrollID>/serializedQuery */
               "temporal": "2015-03-31T17:06:00.000Z,2015-03-31T17:10:00.000Z",
               "bounding_box": "5.0196,36.73504,7.91089,43.2472",
               "collection_concept_id": "C1268429762-EEDTEST"
@@ -104,7 +105,7 @@ Query filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
           "status": "successful",
           "retryCount": 0,
           "inputFiles":  ["https://harmony.example/service-results/staging-bucket/public/.../granule_xyz.nc4"],
-          "outputFiles": [https://harmony.example/service-results/staging-bucket/public/.../granule_xyz_subsetted.nc4]
+          "outputFiles": ["https://harmony.example/service-results/staging-bucket/public/.../granule_xyz_subsetted.nc4"]
         },
       ]
     }
