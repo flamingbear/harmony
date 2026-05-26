@@ -141,15 +141,16 @@ I don't know for sure how important the `operation` block is for this service. B
 
 ## Open Questions / limitations
 
-1. **POST request body is not persisted.**
+1. Long requests, POST with large bodies get truncated.
    - Should we save the entire POSTed body to s3 when we exceed the URL limit of 4096 that can be stored in the database?  I assume the workflow-ui, presents even less than that and maybe just the GET encoded full (up to 4096) will be pretty good? good enough?
    - Where would that be writen? `s3://{artifactBucket}/{jobID}/request.json`.
 
 2. Shapefiles? IDK.
    - Would those be available to include if uploaded? Would it be useful?
 
-## Cost
+3. Operations block? Should we keep it?
 
-Per request: one DB read for the job, one for the workflow steps, one paginated SQL query for the work items (bounded by `perPage`, default 100), plus one S3 GET per query-cmr work item on the current page for the CMR `serializedQuery`
+4. Documentation?
+   app/markdown/endpoints.md
 
-STAC resolution: the handler should build the set of unique catalog URLs across the *completed* WIs on the page since the input and output sides depend on which step we're talking about.  `perPage` (default 100, max 1000) bounds the worst case independently of total job size.
+5. Private file sentinal?  keep/ignore
