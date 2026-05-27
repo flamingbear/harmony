@@ -18,7 +18,8 @@ import { defaultObjectStore } from '../util/object-store';
 import { getCatalogLinks, readCatalogItems } from '../util/stac';
 import { getRequestRoot } from '../util/url';
 
-const DEFAULT_PER_PAGE = 100;
+const DEFAULT_PER_PAGE = 50;
+const MAX_BATCH_CATALOGS = 100;
 const MAX_PER_PAGE = 1000;
 const VALID_STATUSES = Object.values(WorkItemStatus);
 
@@ -50,6 +51,12 @@ interface JobStep {
   stepIndex: number;
   workItemCount: number;
   workItems: StepWorkItem[];
+  paging?: StepPaging;
+}
+
+interface StepPaging {
+  next?: string;
+  previous?: string;
 }
 
 /**
@@ -173,34 +180,50 @@ function safePublicLink(href: string, frontendRoot: string): string {
   }
 }
 
+// Per-WI output catalog list, plus how many additional catalog files (if any)
+// were dropped to keep the S3 fan-out bounded. omittedCount is 0 for regular
+// (non query-cmr) WIs, since those have exactly one output catalog.
+interface WiOutputCatalogs {
+  urls: string[];
+  omittedCount: number;
+}
+
 interface ResolvedCatalogs {
   // Map of local catalog.json -> Array of safeLinks to file.
   catalogHrefs: Map<string, string[]>;
-  // Map of workflow step index to Array of catalog.json files
-  // only query-cmr's step will have more than one file.
-  wiOutputCatalogs: Map<number, string[]>;
+  // Map of work item id to its output catalog list plus the omitted count.
+  // fan-out steps will have more than one catalog file per WI.
+  wiOutputCatalogs: Map<number, WiOutputCatalogs>;
 }
 
 /**
  * Read query-cmr's `batch-catalogs.json` (the JSON array of catalog filenames
  * it writes alongside its catalogN.json output catalogs) and return absolute
- * URLs to each. Returns [] when the file isn't readable or produced no
- * granules.
+ * URLs to each. Caps the returned URLs at MAX_BATCH_CATALOGS to bound the
+ * downstream per-catalog S3 reads; reports any extras as omittedCount.
+ * Returns { urls: [], omittedCount: 0 } when the file isn't readable or
+ * produced no granules.
  *
  * Only meaningful for query-cmr WIs; regular services write a top-level
  * `catalog.json` instead of `batch-catalogs.json`.
  *
  * @param outputDir - the WI's outputs directory URL
- * @returns absolute URLs to each catalogN.json file
+ * @returns the (capped) absolute URLs and the count of additional catalog
+ *   files that were not included
  */
-async function readBatchCatalogs(outputDir: string): Promise<string[]> {
+async function readBatchCatalogs(outputDir: string): Promise<WiOutputCatalogs> {
   try {
+    // TODO [MHS, 05/27/2026]  Seems like there should a better way to find this.
     const filenames = await defaultObjectStore().getObjectJson(
       `${outputDir}batch-catalogs.json`,
     ) as string[];
-    return filenames.map((f) => `${outputDir}${f}`);
+    const capped = filenames.slice(0, MAX_BATCH_CATALOGS);
+    return {
+      urls: capped.map((f) => `${outputDir}${f}`),
+      omittedCount: Math.max(0, filenames.length - MAX_BATCH_CATALOGS),
+    };
   } catch {
-    return [];
+    return { urls: [], omittedCount: 0 };
   }
 }
 
@@ -224,13 +247,16 @@ async function resolveAllCatalogs(
   //   - query-cmr WIs (wi.scrollID is set) write multiple catalogN.json files
   //     indexed by batch-catalogs.json
   //   - All other services write a single top-level catalog.json (does it?)
-  const wiOutputCatalogs = new Map<number, string[]>();
+  const wiOutputCatalogs = new Map<number, WiOutputCatalogs>();
   await Promise.all(completed_workitems.map(async (wi) => {
     if (wi.scrollID) {
       const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
       wiOutputCatalogs.set(wi.id, await readBatchCatalogs(outputDir));
     } else {
-      wiOutputCatalogs.set(wi.id, [getStacLocation({ id: wi.id, jobID: wi.jobID }, 'catalog.json')]);
+      wiOutputCatalogs.set(wi.id, {
+        urls: [getStacLocation({ id: wi.id, jobID: wi.jobID }, 'catalog.json')],
+        omittedCount: 0,
+      });
     }
   }));
 
@@ -240,7 +266,7 @@ async function resolveAllCatalogs(
   const allCatalogUrls = new Set<string>();
   for (const wi of completed_workitems) {
     if (wi.stacCatalogLocation) allCatalogUrls.add(wi.stacCatalogLocation);
-    for (const url of wiOutputCatalogs.get(wi.id) ?? []) allCatalogUrls.add(url);
+    for (const url of wiOutputCatalogs.get(wi.id)?.urls ?? []) allCatalogUrls.add(url);
   }
 
   const catalogHrefs = new Map<string, string[]>();
@@ -269,9 +295,17 @@ function buildWorkItem(
 ): StepWorkItem {
   const { catalogHrefs, wiOutputCatalogs } = resolved;
   const outputCatalogs = wiOutputCatalogs.get(wi.id);
-  const outputFiles = outputCatalogs === undefined
-    ? null
-    : outputCatalogs.flatMap((url) => catalogHrefs.get(url) ?? []);
+  let outputFiles: string[] | null;
+  if (outputCatalogs === undefined) {
+    outputFiles = null;
+  } else {
+    outputFiles = outputCatalogs.urls.flatMap((url) => catalogHrefs.get(url) ?? []);
+    if (outputCatalogs.omittedCount > 0) {
+      outputFiles.push(
+        `Not all files resolved, there are ${outputCatalogs.omittedCount} more files not shown`,
+      );
+    }
+  }
   return {
     id: wi.id,
     status: wi.status,
