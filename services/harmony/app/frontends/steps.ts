@@ -225,10 +225,10 @@ async function resolveAllCatalogs(
 ): Promise<ResolvedCatalogs> {
   const completed_workitems = workItems.filter((wi) => COMPLETED_WORK_ITEM_STATUSES.includes(wi.status));
 
-  // Determine each completed WI's output catalog file URLs.
+  // Determine each completed WI's *output* catalog file URLs.
   //   - query-cmr WIs (wi.scrollID is set) write multiple catalogN.json files
   //     indexed by batch-catalogs.json
-  //   - All other services write a single top-level catalog.json
+  //   - All other services write a single top-level catalog.json (does it?)
   const wiOutputCatalogs = new Map<number, string[]>();
   await Promise.all(completed_workitems.map(async (wi) => {
     if (wi.scrollID) {
@@ -242,14 +242,14 @@ async function resolveAllCatalogs(
   // Collect every unique catalog file URL: each completed WI's
   // input (stacCatalogLocation) plus every catalog file in its outputs.
   // Handles the step N output == step N+1 input overlap.
-  const allUrls = new Set<string>();
+  const allCatalogUrls = new Set<string>();
   for (const wi of completed_workitems) {
-    if (wi.stacCatalogLocation) allUrls.add(wi.stacCatalogLocation);
-    for (const url of wiOutputCatalogs.get(wi.id) ?? []) allUrls.add(url);
+    if (wi.stacCatalogLocation) allCatalogUrls.add(wi.stacCatalogLocation);
+    for (const url of wiOutputCatalogs.get(wi.id) ?? []) allCatalogUrls.add(url);
   }
 
   const catalogHrefs = new Map<string, string[]>();
-  await Promise.all(Array.from(allUrls).map(async (url) => {
+  await Promise.all(Array.from(allCatalogUrls).map(async (url) => {
     const rawHrefs = await resolveDataHrefs(url);
     catalogHrefs.set(url, rawHrefs.map((h) => safePublicLink(h, frontendRoot)));
   }));

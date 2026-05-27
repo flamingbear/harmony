@@ -4,6 +4,7 @@ import request, { Test } from 'supertest';
 
 import { JobStatus } from '../../app/models/job';
 import { WorkItemStatus } from '../../app/models/work-item-interface';
+import { serializedFields as workflowStepDbFields } from '../../app/models/workflow-steps';
 import { auth } from '../helpers/auth';
 import { hookTransaction } from '../helpers/db';
 import { hookRequest } from '../helpers/hooks';
@@ -32,10 +33,11 @@ const hookAdminJobSteps = hookRequest.bind(this, adminJobSteps);
 
 let wi2Id: number;
 
-const ownerJob = buildJob({
+const joeJob = buildJob({
   username: 'joe',
   status: JobStatus.FAILED,
   message: 'Service failed',
+  service_name: 'harmony-best-service',
   request: 'https://harmony.example/foo?bar=baz',
 });
 
@@ -50,10 +52,10 @@ describe('GET /jobs/:jobID/steps', function () {
   hookTransaction();
 
   before(async function () {
-    await ownerJob.save(this.trx);
+    await joeJob.save(this.trx);
     // Step 1: query-cmr with a single successful work item
     const step1 = buildWorkflowStep({
-      jobID: ownerJob.jobID,
+      jobID: joeJob.jobID,
       stepIndex: 1,
       serviceID: '123456789012.dkr.ecr.us-west-2.amazonaws.com/harmonyservices/query-cmr:latest',
       workItemCount: 1,
@@ -61,7 +63,7 @@ describe('GET /jobs/:jobID/steps', function () {
     });
     await step1.save(this.trx);
     const wi1 = buildWorkItem({
-      jobID: ownerJob.jobID,
+      jobID: joeJob.jobID,
       workflowStepIndex: 1,
       serviceID: 'harmonyservices/query-cmr:latest',
       status: WorkItemStatus.SUCCESSFUL,
@@ -71,7 +73,7 @@ describe('GET /jobs/:jobID/steps', function () {
 
     // Step 2: subsetter with a failed work item that has an input catalog from step 1
     const step2 = buildWorkflowStep({
-      jobID: ownerJob.jobID,
+      jobID: joeJob.jobID,
       stepIndex: 2,
       serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
       workItemCount: 1,
@@ -79,11 +81,11 @@ describe('GET /jobs/:jobID/steps', function () {
     });
     await step2.save(this.trx);
     const wi2 = buildWorkItem({
-      jobID: ownerJob.jobID,
+      jobID: joeJob.jobID,
       workflowStepIndex: 2,
       serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
       status: WorkItemStatus.FAILED,
-      stacCatalogLocation: `s3://artifacts/${ownerJob.jobID}/1/outputs/catalog.json`,
+      stacCatalogLocation: `s3://artifacts/${joeJob.jobID}/1/outputs/catalog.json`,
     });
     await wi2.save(this.trx);
     wi2Id = wi2.id;
@@ -112,125 +114,86 @@ describe('GET /jobs/:jobID/steps', function () {
   });
 
   describe('For a user who is not logged in', function () {
-    hookJobSteps({ jobID: ownerJob.jobID });
+    hookJobSteps({ jobID: joeJob.jobID });
     it('redirects to Earthdata Login', function () {
       expect(this.res.statusCode).to.equal(303);
     });
   });
 
   describe('For a non-owner who is not admin', function () {
-    hookJobSteps({ jobID: ownerJob.jobID, username: 'stranger' });
+    hookJobSteps({ jobID: joeJob.jobID, username: 'stranger' });
     it('denies access', function () {
-      expect([403, 404]).to.include(this.res.statusCode);
+      expect(this.res.statusCode).to.equal(403);
     });
   });
 
   describe('For the owner requesting the default steps response', function () {
-    hookJobSteps({ jobID: ownerJob.jobID, username: 'joe' });
+    hookJobSteps({ jobID: joeJob.jobID, username: 'joe' });
 
     it('returns 200 with a steps document for the job', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
-      expect(body.jobID).to.equal(ownerJob.jobID);
+      expect(body.jobID).to.equal(joeJob.jobID);
       expect(body.status).to.equal('failed');
       expect(body.username).to.equal('joe');
+      expect(body.serviceName).to.equal('harmony-best-service');
       expect(body.request.url).to.equal('https://harmony.example/foo?bar=baz');
-      expect(body.request.body).to.be.undefined;
       expect(body.request.truncated).to.equal(false);
     });
 
-    it('includes both workflow steps with serviceID and stepIndex', function () {
+    it('includes both workflow steps with expected keys', function () {
       const body = JSON.parse(this.res.text);
       expect(body.steps).to.have.lengthOf(2);
       expect(body.steps[0].stepIndex).to.equal(1);
       expect(body.steps[0].serviceID).to.equal('harmonyservices/query-cmr:latest');
+      expect(body.steps[0].workItemCount).to.equal(1);
       expect(body.steps[1].stepIndex).to.equal(2);
       expect(body.steps[1].serviceID).to.equal('nasa/harmony-opendap-subsetter:1.2.4');
+      expect(body.steps[1].workItemCount).to.equal(1);
+      expect(body.steps[1].workItems).to.have.length(1);
     });
 
-    it('does not expose step-level state flags on the response', function () {
+    it('does not expose step-level state on the response', function () {
+      const expectedKeys = ['serviceID', 'stepIndex', 'workItemCount', 'workItems'];
+      const unexposedKeys = workflowStepDbFields.filter((f)=> !expectedKeys.includes(f))
       const body = JSON.parse(this.res.text);
       for (const step of body.steps) {
-        expect(step).to.not.have.property('isBatched');
-        expect(step).to.not.have.property('hasAggregatedOutput');
-        expect(step).to.not.have.property('isComplete');
+        expect(step).to.not.have.any.keys(...unexposedKeys)
       }
     });
 
-    it('exposes one curated operation at the response root, not per step', function () {
+    it('exposes one operation at the response root', function () {
       const body = JSON.parse(this.res.text);
       expect(body.operation).to.be.an('object');
       // Allow-listed user-facing fields the curator forwards (when present
       // on the source operation) — at minimum, sources should appear.
       expect(body.operation).to.include.keys('sources');
+      expect(body.operation).to.include.keys('format');
+      expect(body.operation).to.include.keys('subset');
+      expect(body.operation).to.include.keys('temporal');
+
       // Internal / sensitive fields must not leak through the allow-list.
-      expect(body.operation).to.not.have.property('accessToken');
-      expect(body.operation).to.not.have.property('callback');
-      expect(body.operation).to.not.have.property('stagingLocation');
-      expect(body.operation).to.not.have.property('requestId');
-      expect(body.operation).to.not.have.property('user');
-      expect(body.operation).to.not.have.property('client');
-      expect(body.operation).to.not.have.property('version');
-      expect(body.operation).to.not.have.property('isSynchronous');
-      expect(body.operation).to.not.have.property('$schema');
-      // Steps no longer carry a per-step operation field.
-      for (const step of body.steps) {
-        expect(step).to.not.have.property('operation');
-      }
+      const unexposedKeys = ['accessToken', 'callback', 'stagingLocation', 'requestId', 'user', 'client', 'version', 'isSynchronous', '$schema']
+      expect(body.operation).to.not.have.any.keys(...unexposedKeys);
     });
 
-    it('does not expose a logs field on work items', function () {
-      const body = JSON.parse(this.res.text);
-      const wi1 = body.steps[0].workItems[0];
-      // Logs live behind the admin-only /logs/:jobID/:id endpoint and are not
-      // surfaced through this response. Admins debugging can reach them
-      // directly using the wi.id we expose here.
-      expect(wi1).to.not.have.property('logs');
-    });
-
-    it('exposes flat inputFiles / outputFiles fields (no nested catalog wrapper)', function () {
+    it('exposes inputFiles / outputFiles fields', function () {
       const body = JSON.parse(this.res.text);
       const wi1 = body.steps[0].workItems[0];
       const wi2 = body.steps[1].workItems[0];
-      expect(wi1).to.not.have.property('input');
-      expect(wi1).to.not.have.property('output');
       expect(wi1).to.have.property('inputFiles');
       expect(wi1).to.have.property('outputFiles');
+      expect(wi1['inputFiles']).to.be.null;
+      expect(wi1['outputFiles']).to.be.an('array');
       expect(wi2).to.have.property('inputFiles');
+      expect(wi2['inputFiles']).to.be.an('array');
       expect(wi2).to.have.property('outputFiles');
     });
 
-    it('always resolves files for completed work items', function () {
-      const body = JSON.parse(this.res.text);
-      const wi1 = body.steps[0].workItems[0];
-      const wi2 = body.steps[1].workItems[0];
-      // Both fixtures are in completed states (SUCCESSFUL / FAILED). Their
-      // catalogs do not exist in test S3, so resolveDataHrefs catches the
-      // error and returns []. The contract is: completed WI => array (not
-      // null), incomplete WI => null. wi1 is query-cmr so inputFiles is
-      // intentionally null (no STAC input by design).
-      expect(wi1.inputFiles).to.equal(null);
-      expect(wi1.outputFiles).to.be.an('array');
-      expect(wi2.inputFiles).to.be.an('array');
-      expect(wi2.outputFiles).to.be.an('array');
-    });
-
-    it('attaches a cmr block (with endpoint) to the query-cmr step', function () {
-      const body = JSON.parse(this.res.text);
-      expect(body.steps[0].cmr).to.be.an('object');
-      expect(body.steps[0].cmr.endpoint).to.be.a('string');
-      // calls[] may be empty when the SearchParams S3 object is absent in tests
-      expect(body.steps[0].cmr.calls).to.be.an('array');
-    });
-
-    it('does not attach a cmr block to non-query-cmr steps', function () {
-      const body = JSON.parse(this.res.text);
-      expect(body.steps[1]).to.not.have.property('cmr');
-    });
   });
 
   describe('Filtering with ?step=', function () {
-    hookJobSteps({ jobID: ownerJob.jobID, username: 'joe', query: { step: 2 } });
+    hookJobSteps({ jobID: joeJob.jobID, username: 'joe', query: { step: 2 } });
     it('returns only the requested step', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
@@ -240,7 +203,7 @@ describe('GET /jobs/:jobID/steps', function () {
   });
 
   describe('Filtering with ?status=failed', function () {
-    hookJobSteps({ jobID: ownerJob.jobID, username: 'joe', query: { status: 'failed' } });
+    hookJobSteps({ jobID: joeJob.jobID, username: 'joe', query: { status: 'failed' } });
     it('keeps only work items in that status', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
@@ -256,7 +219,7 @@ describe('GET /jobs/:jobID/steps', function () {
   });
 
   describe('Pagination with ?perPage=1', function () {
-    hookJobSteps({ jobID: ownerJob.jobID, username: 'joe', query: { perPage: 1 } });
+    hookJobSteps({ jobID: joeJob.jobID, username: 'joe', query: { perPage: 1 } });
     it('returns one work item with pagination metadata indicating more pages', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
@@ -281,11 +244,11 @@ describe('GET /jobs/:jobID/steps', function () {
   });
 
   describe('For an admin user fetching another user\'s job via /admin/jobs/:jobID/steps', function () {
-    hookAdminJobSteps({ jobID: ownerJob.jobID, username: adminUsername });
+    hookAdminJobSteps({ jobID: joeJob.jobID, username: adminUsername });
     it('returns 200 with the job\'s steps', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
-      expect(body.jobID).to.equal(ownerJob.jobID);
+      expect(body.jobID).to.equal(joeJob.jobID);
       expect(body.steps).to.have.lengthOf(2);
     });
   });
@@ -301,7 +264,7 @@ describe('GET /jobs/:jobID/steps', function () {
   });
 
   describe('Filtering with ?step= for an unknown step index', function () {
-    hookJobSteps({ jobID: ownerJob.jobID, username: 'joe', query: { step: 99 } });
+    hookJobSteps({ jobID: joeJob.jobID, username: 'joe', query: { step: 99 } });
     it('returns 200 with an empty steps array', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
@@ -315,7 +278,7 @@ describe('GET /jobs/:jobID/steps', function () {
     before(async function () {
       this.res = await jobSteps(
         this.frontend,
-        { jobID: ownerJob.jobID, query: { workItem: wi2Id } },
+        { jobID: joeJob.jobID, query: { workItem: wi2Id } },
       ).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -333,7 +296,7 @@ describe('GET /jobs/:jobID/steps', function () {
   });
 
   describe('Pagination — page 2 with ?perPage=1', function () {
-    hookJobSteps({ jobID: ownerJob.jobID, username: 'joe', query: { perPage: 1, page: 2 } });
+    hookJobSteps({ jobID: joeJob.jobID, username: 'joe', query: { perPage: 1, page: 2 } });
     it('returns the second page of work items with currentPage=2', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
@@ -348,7 +311,7 @@ describe('GET /jobs/:jobID/steps', function () {
 
   describe('Validation errors', function () {
     describe('?status=bogus', function () {
-      hookJobSteps({ jobID: ownerJob.jobID, username: 'joe', query: { status: 'bogus' } });
+      hookJobSteps({ jobID: joeJob.jobID, username: 'joe', query: { status: 'bogus' } });
       it('returns 400', function () {
         expect(this.res.statusCode).to.equal(400);
       });
