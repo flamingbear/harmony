@@ -10,10 +10,8 @@ import WorkflowStep, { getWorkflowStepsByJobId } from '../models/workflow-steps'
 import { sanitizeImage } from '@harmony/util/string';
 
 import { createPublicPermalink } from './service-results';
-import { s3UrlForStoredQueryParams } from '../util/cmr';
 import db from '../util/db';
 import { isAdminUser } from '../util/edl-api';
-import env from '../util/env';
 import { RequestValidationError } from '../util/errors';
 import { getJobIfAllowed } from '../util/job';
 import { defaultObjectStore } from '../util/object-store';
@@ -51,10 +49,6 @@ interface JobStep {
   serviceID: string;
   stepIndex: number;
   workItemCount: number;
-  cmr?: {
-    endpoint: string;
-    calls: { workItemId: number; params: unknown }[];
-  };
   workItems: StepWorkItem[];
 }
 
@@ -174,7 +168,8 @@ function safePublicLink(href: string, frontendRoot: string): string {
   try {
     return createPublicPermalink(href, frontendRoot);
   } catch {
-    return PRIVATE_FILE_PLACEHOLDER;
+    // TODO [MHS, 05/27/2026]  unsafe, check in create public permalink
+    return href
   }
 }
 
@@ -288,31 +283,6 @@ function buildWorkItem(
   };
 }
 
-/**
- * For the work items belonging to a query-cmr step, fetch each stored CMR
- * query (one per scrollID) from S3 and return them inlined. Failures are
- * silent: if a SearchParams object is missing, that call is omitted.
- *
- * @param workItems - the query-cmr work items whose stored queries to fetch
- * @returns the resolved CMR queries, one entry per work item with a readable
- *   SearchParams object
- */
-async function buildCmrCalls(
-  workItems: WorkItem[],
-): Promise<{ workItemId: number; params: unknown }[]> {
-  const store = defaultObjectStore();
-  const calls: { workItemId: number; params: unknown }[] = [];
-  for (const wi of workItems) {
-    if (!wi.scrollID) continue;
-    try {
-      const params = await store.getObjectJson(s3UrlForStoredQueryParams(wi.scrollID));
-      calls.push({ workItemId: wi.id, params });
-    } catch {
-      // The SearchParams object may have been evicted or never written; skip.
-    }
-  }
-  return calls;
-}
 
 /**
  * Build the full step list. The workItems passed in are already
@@ -354,14 +324,6 @@ async function buildSteps(
       workItemCount: step.workItemCount,
       workItems: stepWorkItems.map((wi) => buildWorkItem(wi, resolved)),
     };
-
-    const cmrWorkItems = stepWorkItems.filter((wi) => wi.scrollID);
-    if (cmrWorkItems.length > 0) {
-      jobStep.cmr = {
-        endpoint: env.cmrEndpoint,
-        calls: await buildCmrCalls(cmrWorkItems),
-      };
-    }
 
     result.push(jobStep);
   }
@@ -406,10 +368,6 @@ export async function getJobSteps(
     const resolvedCatalogs = await resolveAllCatalogs(workItems, frontendRoot);
     const jobSteps = await buildSteps(steps, workItems, resolvedCatalogs, q);
 
-    const firstOperationStep = steps.find((s) => s.stepIndex === 1) ?? steps[0];
-    const operation = firstOperationStep
-      ? pickPublicOperationFields(firstOperationStep.operation)
-      : null;
 
     const requestTruncated = !!job.request && job.request.length === TEXT_LIMIT;
     const responseBody = {
@@ -420,13 +378,7 @@ export async function getJobSteps(
       message: job.message,
       username: job.username,
       numInputGranules: job.numInputGranules,
-      request: {
-        url: job.request,
-        method: 'GET',
-        // body: tbd,
-        truncated: requestTruncated,
-      },
-      operation,
+      request: job.request,
       steps: jobSteps,
       pagination: {
         currentPage: pagination.currentPage,

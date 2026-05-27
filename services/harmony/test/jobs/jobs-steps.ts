@@ -137,8 +137,7 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(body.status).to.equal('failed');
       expect(body.username).to.equal('joe');
       expect(body.serviceName).to.equal('harmony-best-service');
-      expect(body.request.url).to.equal('https://harmony.example/foo?bar=baz');
-      expect(body.request.truncated).to.equal(false);
+      expect(body.request).to.equal('https://harmony.example/foo?bar=baz');
     });
 
     it('includes both workflow steps with expected keys', function () {
@@ -153,28 +152,14 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(body.steps[1].workItems).to.have.length(1);
     });
 
-    it('does not expose step-level state on the response', function () {
+    it('exposes correct step-level state on the response', function () {
       const expectedKeys = ['serviceID', 'stepIndex', 'workItemCount', 'workItems'];
       const unexposedKeys = workflowStepDbFields.filter((f)=> !expectedKeys.includes(f))
       const body = JSON.parse(this.res.text);
       for (const step of body.steps) {
         expect(step).to.not.have.any.keys(...unexposedKeys)
+        expect(step).to.have.keys(expectedKeys)
       }
-    });
-
-    it('exposes one operation at the response root', function () {
-      const body = JSON.parse(this.res.text);
-      expect(body.operation).to.be.an('object');
-      // Allow-listed user-facing fields the curator forwards (when present
-      // on the source operation) — at minimum, sources should appear.
-      expect(body.operation).to.include.keys('sources');
-      expect(body.operation).to.include.keys('format');
-      expect(body.operation).to.include.keys('subset');
-      expect(body.operation).to.include.keys('temporal');
-
-      // Internal / sensitive fields must not leak through the allow-list.
-      const unexposedKeys = ['accessToken', 'callback', 'stagingLocation', 'requestId', 'user', 'client', 'version', 'isSynchronous', '$schema']
-      expect(body.operation).to.not.have.any.keys(...unexposedKeys);
     });
 
     it('exposes inputFiles / outputFiles fields', function () {

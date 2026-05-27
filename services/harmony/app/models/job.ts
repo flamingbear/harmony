@@ -113,9 +113,9 @@ export class JobForDisplay {
 
   labels: string[];
 
-  steps?: string;
-
   serviceName?: string;
+
+  steps?: string;
 
   request: string;
 

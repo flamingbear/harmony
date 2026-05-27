@@ -8,7 +8,7 @@ A primary use case is **debugging a failed service**: given a failed work item, 
 
 A secondary use case is **Parital Job Completion** — Allowing a user who had a workstep that may have failed the ability to find and get the output that did work.
 
-Is there a third usecase? Replaying failed jobs?
+Is there a third usecase? Replaying failed jobs?  This is perhaps after MVP. Add cmr/operation/full request
 
 
 ## Route
@@ -46,18 +46,14 @@ Query filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
   "username": "esdis-username",
   "numInputGranules": 5,
   "request": "https://harmony.../ogc-api-coverages/...?...",
-  "workItemCount": 100,
-  "statuses": {
-    "successful": 90,
-    "warning": 5,
-    "failure": 4,
-    "canceled": 0
-  },
   "steps": [
     {
       "stepIndex": 1,
       "serviceID": "harmonyservices/query-cmr:latest",
       "workItemCount": 1,
+      "statuses": {
+        "successful": 1
+      },
       "workItems": [
         {
           "id": 9491393,
@@ -73,7 +69,11 @@ Query filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
     {
       "stepIndex": 2,
       "serviceID": "nasa/harmony-opendap-subsetter:1.2.4",
-      "workItemCount": 1,
+      "workItemCount": 20,
+      "statuses": {
+        "successful": 19,
+        "failure": 1
+      },
       "workItems": [
         {
           "id": 9491415,
@@ -85,16 +85,27 @@ Query filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
           "outputFiles": [
             "https://harmony.example/service-results/staging-bucket/public/.../granule_xyz_subsetted.nc4"
           ]
+        },
+        {
+          "id": 9491416,
+          "status": "failure",
+          "retryCount": 0,
+          "inputFiles": [
+            "https://harmony.example/service-results/staging-bucket/public/.../granule_xyz1.nc4"
+          ],
+          "outputFiles": [
+            "https://harmony.example/service-results/staging-bucket/public/.../granule_xyz1_subsetted.nc4"
+          ]
+        },
+        {
+          "etc": "more worktems"
         }
-      ]
+      ],
+      "paging": {
+        "next": "link to next  block of workitems for harmony-opendap-subsetter"
+      }
     }
-  ],
-  "pagination": {
-    "currentPage": 1,
-    "perPage": 100,
-    "total": 5,
-    "lastPage": 1
-  }
+  ]
 }
 ```
 
@@ -113,6 +124,7 @@ The handler resolves catalogs only for WIs in `COMPLETED_WORK_ITEM_STATUSES` (`s
 URLs are signed via the same `createPublicPermalink` path that `/jobs/:jobID` uses for `links` hrefs.
 
 I have added a sentinal for the case where a file is created and it's somewhere we can't create a link to, not after a `/public` path in s3., that returns `<private file location>` but I'm not sure that's useful or needed.
+
 
 ## Redactions
 
