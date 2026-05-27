@@ -23,13 +23,13 @@ Owner, admin, or holder of a shared-job access token may view.
 
 ## Query parameters
 
-| Param      | Values                             | Effect                                                                                                       |
-|------------|------------------------------------|--------------------------------------------------------------------------------------------------------------|
-| `step`     | integer                            | Limit to one step the job service chain (filters on `workflowStepIndex`) e.g. just net2cog steps             |
-| `status`   | one of the `WorkItemStatus` values | Limit to work items by status. [`ready`, `queued`, `running`, `successful`, `failed`, `canceled`, `warning`] |
-| `workItem` | integer                            | Limit to a single work item by id.                                                                           |
-| `page`     | integer (default 1)                | Page number for work items.                                                                                  |
-| `perPage`  | integer (default 100, max 1000)    | Page size for work items.                                                                                    |
+| Param      | Values                          | Effect                                                                                                                     |
+|------------|---------------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| `step`     | integer                         | Limit to one or more steps in the job service chain (filters on `workflowStepIndex`) e.g. just net2cog steps               |
+| `status`   | `WorkItemStatus` values         | Limit to work items by one or more statuses. [`ready`, `queued`, `running`, `successful`, `failed`, `canceled`, `warning`] |
+| `workItem` | integer                         | Limit to one or more work items by id.                                                                                     |
+| `page`     | integer (default 1)             | Page number for work items.                                                                                                |
+| `perPage`  | integer (default 100, max 1000) | Page size for work items.                                                                                                  |
 
 Query filters are pushed into the SQL `WHERE` clause via the existing `queryAll` work-item helper, so a job with a million work items never round-trips a million rows. Pagination metadata is included in the response and is the bound on expanding file locations from s3 and fetching work-items.
 
@@ -45,56 +45,31 @@ Query filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
   "message": "The job has completed with errors. See the errors field for more details",
   "username": "esdis-username",
   "numInputGranules": 5,
-
-  "request": {
-    "url": "https://harmony.../ogc-api-coverages/...?...",
-    "method": "GET",
-    "truncated": false
+  "request": "https://harmony.../ogc-api-coverages/...?...",
+  "workItemCount": 100,
+  "statuses": {
+    "successful": 90,
+    "warning": 5,
+    "failure": 4,
+    "canceled": 0
   },
-
-  "operation": {
-    "sources": [ /* collections, variables, granules */ ],
-    "format": { /* mime, srs, scaleExtent, ... */ },
-    "subset": { /* bbox, temporal, dimensions, geojson, ... */ },
-    "extendDimensions": [],
-    "temporal": { "start": "...", "end": "..." },
-    "concatenate": false,
-    "average": null,
-    "pixelSubset": false,
-    "extraArgs": { /* service-specific config */ }
-  },
-
   "steps": [
     {
       "stepIndex": 1,
       "serviceID": "harmonyservices/query-cmr:latest",
       "workItemCount": 1,
-
-      "cmr": {
-        "endpoint": "https://cmr.earthdata.nasa.gov",
-        "calls": [
-          {
-            "workItemId": 9491393,
-            "params": { /* contents of s3://<stagingBucket>/SearchParams/<scrollID>/serializedQuery */
-              "temporal": "2015-03-31T17:06:00.000Z,2015-03-31T17:10:00.000Z",
-              "bounding_box": "5.0196,36.73504,7.91089,43.2472",
-              "collection_concept_id": "C1268429762-EEDTEST"
-            }
-          }
-        ]
-      },
-
       "workItems": [
         {
           "id": 9491393,
           "status": "successful",
           "retryCount": 0,
           "inputFiles": null,
-          "outputFiles": ["https://harmony.example/service-results/staging-bucket/public/.../granule_xyz.nc4"]
+          "outputFiles": [
+            "https://harmony.example/service-results/staging-bucket/public/.../granule_xyz.nc4"
+          ]
         }
       ]
     },
-
     {
       "stepIndex": 2,
       "serviceID": "nasa/harmony-opendap-subsetter:1.2.4",
@@ -104,13 +79,16 @@ Query filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
           "id": 9491415,
           "status": "successful",
           "retryCount": 0,
-          "inputFiles":  ["https://harmony.example/service-results/staging-bucket/public/.../granule_xyz.nc4"],
-          "outputFiles": ["https://harmony.example/service-results/staging-bucket/public/.../granule_xyz_subsetted.nc4"]
-        },
+          "inputFiles": [
+            "https://harmony.example/service-results/staging-bucket/public/.../granule_xyz.nc4"
+          ],
+          "outputFiles": [
+            "https://harmony.example/service-results/staging-bucket/public/.../granule_xyz_subsetted.nc4"
+          ]
+        }
       ]
     }
   ],
-
   "pagination": {
     "currentPage": 1,
     "perPage": 100,
