@@ -1,7 +1,6 @@
 import { NextFunction, Response } from 'express';
 
 import HarmonyRequest from '../models/harmony-request';
-import { TEXT_LIMIT } from '../models/job';
 import WorkItem, {
   queryAll as queryWorkItems, workItemStatusCountsForJob,
 } from '../models/work-item';
@@ -20,9 +19,8 @@ import { defaultObjectStore } from '../util/object-store';
 import { getCatalogLinks, readCatalogItems } from '../util/stac';
 import { getRequestRoot } from '../util/url';
 
-const DEFAULT_PER_PAGE = 50;
+export const DEFAULT_PER_PAGE = 50;
 const MAX_BATCH_CATALOGS = 100;
-const MAX_PER_PAGE = 1000;
 const VALID_STATUSES = Object.values(WorkItemStatus);
 
 // List of fields presented to the user surfaced from the parsed DataOperation.
@@ -36,8 +34,6 @@ interface StepsQuery {
   step?: number;
   status?: WorkItemStatus;
   workItem?: number;
-  page: number;
-  perPage: number;
 }
 
 interface StepWorkItem {
@@ -60,8 +56,7 @@ interface JobStep {
 }
 
 interface StepPaging {
-  next?: string;
-  previous?: string;
+  message: string;
 }
 
 /**
@@ -72,7 +67,7 @@ interface StepPaging {
  * @throws RequestValidationError - if any parameter is not a valid value
  */
 function parseQuery(query: Record<string, unknown>): StepsQuery {
-  const out: StepsQuery = { page: 1, perPage: DEFAULT_PER_PAGE };
+  const out: StepsQuery = {};
 
   if (query.step !== undefined) {
     const n = Number(query.step);
@@ -96,22 +91,6 @@ function parseQuery(query: Record<string, unknown>): StepsQuery {
       throw new RequestValidationError('workItem must be a positive integer');
     }
     out.workItem = n;
-  }
-
-  if (query.page !== undefined) {
-    const n = Number(query.page);
-    if (!Number.isInteger(n) || n < 1) {
-      throw new RequestValidationError('page must be a positive integer');
-    }
-    out.page = n;
-  }
-
-  if (query.perPage !== undefined) {
-    const n = Number(query.perPage);
-    if (!Number.isInteger(n) || n < 1 || n > MAX_PER_PAGE) {
-      throw new RequestValidationError(`perPage must be a positive integer no greater than ${MAX_PER_PAGE}`);
-    }
-    out.perPage = n;
   }
 
   return out;
@@ -329,49 +308,49 @@ function buildWorkItem(
 }
 
 
+// A workflow step paired with its bounded page of work items and the total
+// number of work items that matched (used to decide whether to page).
+interface StepWorkItems {
+  step: WorkflowStep;
+  workItems: WorkItem[];
+  total: number;
+}
+
 /**
- * Build the full step list. The workItems passed in are already
- * the filtered, paginated set; this function groups them under their parent
- * step. Steps whose stepIndex was filtered out by ?step= are omitted.
+ * Build the full step list from each step's already-bounded page of work items.
+ * A step whose total matching work item count exceeds DEFAULT_PER_PAGE gets a
+ * placeholder `paging` block. When a status/workItem filter is active, steps
+ * with no matching work items are omitted.
  *
- * @param workflowSteps - all workflow steps for the job
- * @param workItems - the filtered, paginated page of work items to group
+ * @param stepResults - each workflow step with its bounded work items and total
  * @param resolved - resolved-catalog data from resolveAllCatalogs
  * @param statusCounts - per-step, per-status work item counts for the whole job
- * @param q - the parsed steps query, used to honor the ?step= filter
- * @returns the steps with their work items and any CMR call details
+ * @param q - the parsed steps query, used to honor the status/workItem filters
+ * @returns the steps with their work items, status summary, and any paging note
  */
-async function buildSteps(
-  workflowSteps: WorkflowStep[],
-  workItems: WorkItem[],
+function buildSteps(
+  stepResults: StepWorkItems[],
   resolved: ResolvedCatalogs,
   statusCounts: Map<number, Partial<Record<WorkItemStatus, number>>>,
   q: StepsQuery,
-): Promise<JobStep[]> {
-
-  // group the workitems by their stepindex (one for each service in the chain)
-  const byStepIndex = new Map<number, WorkItem[]>();
-   for (const wi of workItems) {
-    const arr = byStepIndex.get(wi.workflowStepIndex) ?? [];
-    arr.push(wi);
-    byStepIndex.set(wi.workflowStepIndex, arr);
-  }
-
+): JobStep[] {
   const result: JobStep[] = [];
   const filtering = q.status !== undefined || q.workItem !== undefined;
-  for (const step of workflowSteps) {
-    if (q.step !== undefined && step.stepIndex !== q.step) continue;
-    const stepWorkItems = byStepIndex.get(step.stepIndex) ?? [];
-    // Don't show steps with no workitems
-    if (filtering && stepWorkItems.length === 0) continue;
+  for (const { step, workItems, total } of stepResults) {
+    // Don't show steps without workitems.
+    if (filtering && workItems.length === 0) continue;
 
     const jobStep: JobStep = {
       serviceID: sanitizeImage(step.serviceID),
       stepIndex: step.stepIndex,
       workItemCount: step.workItemCount,
       statuses: statusCounts.get(step.stepIndex) ?? {},
-      workItems: stepWorkItems.map((wi) => buildWorkItem(wi, resolved)),
+      workItems: workItems.map((wi) => buildWorkItem(wi, resolved)),
     };
+    // workItems is capped at DEFAULT_PER_PAGE per step; flag steps with more.
+    if (total > DEFAULT_PER_PAGE) {
+      jobStep.paging = { message: 'Paging of results available with HARMONY-2354' };
+    }
 
     result.push(jobStep);
   }
@@ -400,26 +379,29 @@ export async function getJobSteps(
     const destinationBucket = job.destination_url?.substring(5).split('/')[0];
 
     const steps = await getWorkflowStepsByJobId(db, jobID);
+    const statusCounts = await workItemStatusCountsForJob(db, jobID);
 
-    const workItemQuery: WorkItemQuery = {
-      where: { jobID },
-      orderBy: { field: 'id', value: 'asc' },
-    };
-    if (q.step !== undefined) workItemQuery.where.workflowStepIndex = q.step;
-    if (q.status !== undefined) workItemQuery.where.status = q.status;
-    if (q.workItem !== undefined) workItemQuery.where.id = q.workItem;
+    const selectedSteps = q.step !== undefined
+      ? steps.filter((s) => s.stepIndex === q.step)
+      : steps;
 
-    const { workItems, pagination } = await queryWorkItems(
-      db, workItemQuery, q.page, q.perPage,
-    );
+    // Bound each step's work items independently at DEFAULT_PER_PAGE. Per-step
+    // paging links are coming in HARMONY-2354.
+    const stepResults: StepWorkItems[] = await Promise.all(selectedSteps.map(async (step) => {
+      const where: WorkItemQuery['where'] = { jobID, workflowStepIndex: step.stepIndex };
+      if (q.status !== undefined) where.status = q.status;
+      if (q.workItem !== undefined) where.id = q.workItem;
+      const { workItems, pagination } = await queryWorkItems(
+        db, { where, orderBy: { field: 'id', value: 'asc' } }, 1, DEFAULT_PER_PAGE,
+      );
+      return { step, workItems, total: pagination.total };
+    }));
 
     const frontendRoot = getRequestRoot(req);
-    const resolvedCatalogs = await resolveAllCatalogs(workItems, frontendRoot, destinationBucket );
-    const statusCounts = await workItemStatusCountsForJob(db, jobID);
-    const jobSteps = await buildSteps(steps, workItems, resolvedCatalogs, statusCounts, q);
+    const allWorkItems = stepResults.flatMap((r) => r.workItems);
+    const resolvedCatalogs = await resolveAllCatalogs(allWorkItems, frontendRoot, destinationBucket);
+    const jobSteps = buildSteps(stepResults, resolvedCatalogs, statusCounts, q);
 
-
-    const requestTruncated = !!job.request && job.request.length === TEXT_LIMIT;
     const responseBody = {
       jobID: job.jobID,
       serviceName: job.service_name,
@@ -430,12 +412,6 @@ export async function getJobSteps(
       numInputGranules: job.numInputGranules,
       request: job.request,
       steps: jobSteps,
-      pagination: {
-        currentPage: pagination.currentPage,
-        perPage: pagination.perPage,
-        total: pagination.total,
-        lastPage: pagination.lastPage,
-      },
     };
 
     res.json(responseBody);

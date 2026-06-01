@@ -2,7 +2,9 @@ import { expect } from 'chai';
 import { before, describe, it } from 'mocha';
 import request, { Test } from 'supertest';
 
+import { DEFAULT_PER_PAGE } from '../../app/frontends/steps';
 import { JobStatus } from '../../app/models/job';
+import WorkItem from '../../app/models/work-item';
 import { getStacLocation, WorkItemStatus } from '../../app/models/work-item-interface';
 import { serializedFields as workflowStepDbFields } from '../../app/models/workflow-steps';
 import { objectStoreForProtocol } from '../../app/util/object-store';
@@ -66,6 +68,15 @@ const destBucketJob = buildJob({
   service_name: 'harmony-best-service',
   request: 'https://harmony.example/dest',
   destination_url: 's3://user-bucket/out',
+});
+
+// Job whose single step has more work items than DEFAULT_PER_PAGE (50), to
+// exercise the per-step bound and the placeholder paging block.
+const pagedJob = buildJob({
+  username: 'joe',
+  status: JobStatus.RUNNING,
+  service_name: 'harmony-best-service',
+  request: 'https://harmony.example/paged',
 });
 
 describe('GET /jobs/:jobID/steps', function () {
@@ -199,6 +210,26 @@ describe('GET /jobs/:jobID/steps', function () {
       assets: { data: { href: 's3://user-bucket/out/granule.nc4', roles: ['data'] } },
     }), stacLoc('item0.json'), null, 'application/json');
 
+    // A job whose single step holds 51 READY work items — one over
+    // DEFAULT_PER_PAGE (50). READY items are skipped by catalog resolution, so
+    // this stays cheap while still exercising the per-step bound + paging block.
+    await pagedJob.save(this.trx);
+    const pagedStep = buildWorkflowStep({
+      jobID: pagedJob.jobID,
+      stepIndex: 1,
+      serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
+      workItemCount: 51,
+      operation: validOperation,
+    });
+    await pagedStep.save(this.trx);
+    const pagedWorkItems = Array.from({ length: 51 }, () => buildWorkItem({
+      jobID: pagedJob.jobID,
+      workflowStepIndex: 1,
+      serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
+      status: WorkItemStatus.READY,
+    }));
+    await WorkItem.insertBatch(this.trx, pagedWorkItems);
+
     await this.trx.commit();
   });
 
@@ -301,16 +332,18 @@ describe('GET /jobs/:jobID/steps', function () {
     });
   });
 
-  describe('Pagination with ?perPage=1', function () {
-    hookJobSteps({ jobID: joeJob.jobID, username: 'joe', query: { perPage: 1 } });
-    it('returns one work item with pagination metadata indicating more pages', function () {
+  describe('Top-level pagination has been removed', function () {
+    hookJobSteps({ jobID: joeJob.jobID, username: 'joe' });
+    it('does not include a top-level pagination object', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
-      expect(body.pagination.perPage).to.equal(1);
-      expect(body.pagination.total).to.equal(2);
-      expect(body.pagination.lastPage).to.equal(2);
-      const totalReturnedWIs = body.steps.reduce((acc, s) => acc + s.workItems.length, 0);
-      expect(totalReturnedWIs).to.equal(1);
+      expect(body).to.not.have.property('pagination');
+    });
+    it('does not add a paging block to steps under the per-step limit', function () {
+      const body = JSON.parse(this.res.text);
+      for (const step of body.steps) {
+        expect(step).to.not.have.property('paging');
+      }
     });
   });
 
@@ -378,20 +411,6 @@ describe('GET /jobs/:jobID/steps', function () {
     });
   });
 
-  describe('Pagination — page 2 with ?perPage=1', function () {
-    hookJobSteps({ jobID: joeJob.jobID, username: 'joe', query: { perPage: 1, page: 2 } });
-    it('returns the second page of work items with currentPage=2', function () {
-      expect(this.res.statusCode).to.equal(200);
-      const body = JSON.parse(this.res.text);
-      expect(body.pagination.currentPage).to.equal(2);
-      expect(body.pagination.perPage).to.equal(1);
-      expect(body.pagination.total).to.equal(2);
-      expect(body.pagination.lastPage).to.equal(2);
-      const totalReturnedWIs = body.steps.reduce((acc, s) => acc + s.workItems.length, 0);
-      expect(totalReturnedWIs).to.equal(1);
-    });
-  });
-
   describe('When batch-catalogs.json exceeds MAX_BATCH_CATALOGS', function () {
     hookJobSteps({ jobID: truncatedJob.jobID, username: 'joe' });
 
@@ -433,6 +452,23 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(step.workItems).to.have.lengthOf(1);
       expect(step.workItems[0].status).to.equal('failed');
       expect(step.statuses).to.deep.equal({ successful: 1, failed: 1 });
+    });
+  });
+
+  describe('For a step with more work items than the per-step limit', function () {
+    hookJobSteps({ jobID: pagedJob.jobID, username: 'joe' });
+
+    it('caps the work items at DEFAULT_PER_PAGE and adds a paging note', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      const step = body.steps[0];
+      // 51 work items exist, but the step is bounded to the per-page limit.
+      expect(step.workItems).to.have.lengthOf(DEFAULT_PER_PAGE);
+      expect(step.paging).to.deep.equal({
+        message: 'Paging of results available with HARMONY-2354',
+      });
+      // The status summary for whole step.
+      expect(step.statuses).to.deep.equal({ ready: 51 });
     });
   });
 
