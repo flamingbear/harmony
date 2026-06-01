@@ -207,7 +207,13 @@ describe('GET /jobs/:jobID/steps', function () {
     await s3.upload(JSON.stringify({
       stac_version: '1.0.0', id: 'item0', type: 'Feature',
       geometry: null, properties: {}, links: [],
-      assets: { data: { href: 's3://user-bucket/out/granule.nc4', roles: ['data'] } },
+      assets: {
+        'granule_reformatted.tif': {
+          href: 's3://user-bucket/out/granule_reformatted.tif',
+          type: 'image/tiff; application=geotiff; profile=cloud-optimized',
+          roles: ['visual'],
+        },
+      },
     }), stacLoc('item0.json'), null, 'application/json');
 
     // A job whose single step holds 51 READY work items — one over
@@ -429,11 +435,11 @@ describe('GET /jobs/:jobID/steps', function () {
   describe('For a job written to a user destinationUrl bucket', function () {
     hookJobSteps({ jobID: destBucketJob.jobID, username: 'joe' });
 
-    it('passes an unsignable s3 href through because it is in the destination bucket', function () {
+    it('displays a generic asset and passes the destination-bucket href through', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const outputFiles = body.steps[0].workItems[0].outputFiles;
-      expect(outputFiles).to.deep.equal(['s3://user-bucket/out/granule.nc4']);
+      expect(outputFiles).to.deep.equal(['s3://user-bucket/out/granule_reformatted.tif']);
     });
 
     it('summarizes both statuses present in the step', function () {

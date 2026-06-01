@@ -16,7 +16,7 @@ import { isAdminUser } from '../util/edl-api';
 import { RequestValidationError } from '../util/errors';
 import { getJobIfAllowed } from '../util/job';
 import { defaultObjectStore } from '../util/object-store';
-import { getCatalogLinks, readCatalogItems } from '../util/stac';
+import { readCatalogItems, StacItem } from '../util/stac';
 import { getRequestRoot } from '../util/url';
 
 export const DEFAULT_PER_PAGE = 50;
@@ -122,17 +122,34 @@ function pickPublicOperationFields(
 }
 
 /**
- * Read a STAC catalog and return the resolved data hrefs it references.
+ * Collect every asset href from a list of STAC items.
+ *
+ * @param items - the STAC items whose asset hrefs should be collected
+ * @returns every asset href found across the items
+ */
+function getAllAssetHrefs(items: StacItem[]): string[] {
+  const hrefs: string[] = [];
+  for (const item of items) {
+    for (const name in item.assets ?? {}) {
+      const { href } = item.assets[name];
+      if (href) hrefs.push(href);
+    }
+  }
+  return hrefs;
+}
+
+/**
+ * Read a STAC catalog and return every asset href it references.
  *
  * @param catalogUrl - the location of the STAC catalog to read
- * @returns the data hrefs from the catalog, or an empty array if the catalog
+ * @returns the asset hrefs from the catalog, or an empty array if the catalog
  *   cannot be read (e.g. the service failed before producing it, or the
- *   catalog has no data assets)
+ *   catalog has no assets)
  */
 async function resolveDataHrefs(catalogUrl: string): Promise<string[]> {
   try {
     const items = await readCatalogItems(catalogUrl);
-    return getCatalogLinks(items);
+    return getAllAssetHrefs(items);
   } catch {
     return [];
   }
