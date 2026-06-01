@@ -163,19 +163,22 @@ const PRIVATE_FILE_PLACEHOLDER = '<private file location>';
 
 /**
  * Convert a raw STAC asset href into the public-facing form Harmony uses
- * for job links. S3 URLs under `/public/` become `<root>/service-results/...`
- * permalinks (which pre-sign on follow); HTTPS URLs pass through.
+ * for job links. S3 URLs under `/public/` become `<frontendRoot>/service-results/...`
+ * permalinks (which pre-sign on follow); HTTPS URLs pass through. User
+ * provided S3:// url are returned for allowed locations.
  *
  * @param href - the raw STAC asset href to convert
  * @param frontendRoot - The root URL to use when producing Harmony permalinks
- * @returns the public-facing link, or the PRIVATE_FILE_PLACEHOLDER sentinel if
- *   the href cannot be signed (e.g. an S3 URL outside `/public/`)
+ * @param destinationBucket - the job's destinationUrl bucket name, or undefined
+ *     if the job has no destinationUrl
+ * @returns the Harmony permalink result for a signable href; the raw href if it is in
+ *   the job's destination bucket; otherwise the PRIVATE_FILE_PLACEHOLDER sentinel
  */
-function safePublicLink(href: string, frontendRoot: string, destinationBucket: string): string {
+export function safePublicLink(href: string, frontendRoot: string, destinationBucket: string | undefined): string {
   try {
     return createPublicPermalink(href, frontendRoot);
   } catch {
-    if (destinationBucket && href.startsWith(`s3://${destinationBucket}`)) {
+    if (destinationBucket && href.startsWith(`s3://${destinationBucket}/`)) {
       return href
     }
     return PRIVATE_FILE_PLACEHOLDER
@@ -386,7 +389,7 @@ export async function getJobSteps(
 
     const isAdmin = await isAdminUser(req);
     const job = await getJobIfAllowed(jobID, req.user, isAdmin, req.accessToken, true);
-    const destinationBucket = job.destination_url.substring(5).split('/')[0];
+    const destinationBucket = job.destination_url?.substring(5).split('/')[0];
 
     const steps = await getWorkflowStepsByJobId(db, jobID);
 

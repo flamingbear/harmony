@@ -57,6 +57,17 @@ const truncatedJob = buildJob({
   request: 'https://harmony.example/truncated',
 });
 
+// Job written to a user-supplied destinationUrl bucket: its output catalog's
+// data asset is an s3:// href that createPublicPermalink can't sign (not under
+// /public/).
+const destBucketJob = buildJob({
+  username: 'joe',
+  status: JobStatus.SUCCESSFUL,
+  service_name: 'harmony-best-service',
+  request: 'https://harmony.example/dest',
+  destination_url: 's3://user-bucket/out',
+});
+
 describe('GET /jobs/:jobID/steps', function () {
   hookServersStartStop({ USE_EDL_CLIENT_APP: true });
   hookTransaction();
@@ -148,6 +159,37 @@ describe('GET /jobs/:jobID/steps', function () {
     await objectStoreForProtocol('s3').upload(
       JSON.stringify(overCapCatalogList), batchUrl, null, 'application/json',
     );
+
+    // A job with a destinationUrl with a data asset is an s3:// href in
+    // the user's destination bucket
+    await destBucketJob.save(this.trx);
+    const destStep = buildWorkflowStep({
+      jobID: destBucketJob.jobID,
+      stepIndex: 1,
+      serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
+      workItemCount: 1,
+      operation: validOperation,
+    });
+    await destStep.save(this.trx);
+    const destWi = buildWorkItem({
+      jobID: destBucketJob.jobID,
+      workflowStepIndex: 1,
+      serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
+      status: WorkItemStatus.SUCCESSFUL,
+    });
+    await destWi.save(this.trx);
+    const s3 = objectStoreForProtocol('s3');
+    const stacLoc = (f: string): string =>
+      getStacLocation({ id: destWi.id, jobID: destBucketJob.jobID }, f);
+    await s3.upload(JSON.stringify({
+      stac_version: '1.0.0', id: 'cat', description: 'c',
+      links: [{ rel: 'item', href: './item0.json' }],
+    }), stacLoc('catalog.json'), null, 'application/json');
+    await s3.upload(JSON.stringify({
+      stac_version: '1.0.0', id: 'item0', type: 'Feature',
+      geometry: null, properties: {}, links: [],
+      assets: { data: { href: 's3://user-bucket/out/granule.nc4', roles: ['data'] } },
+    }), stacLoc('item0.json'), null, 'application/json');
 
     await this.trx.commit();
   });
@@ -345,6 +387,17 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(outputFiles[outputFiles.length - 1]).to.equal(
         'Not all files resolved, there are 5 more files not shown (HARMONY-2352)',
       );
+    });
+  });
+
+  describe('For a job written to a user destinationUrl bucket', function () {
+    hookJobSteps({ jobID: destBucketJob.jobID, username: 'joe' });
+
+    it('passes an unsignable s3 href through because it is in the destination bucket', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      const outputFiles = body.steps[0].workItems[0].outputFiles;
+      expect(outputFiles).to.deep.equal(['s3://user-bucket/out/granule.nc4']);
     });
   });
 
