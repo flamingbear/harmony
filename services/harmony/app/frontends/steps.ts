@@ -171,12 +171,14 @@ const PRIVATE_FILE_PLACEHOLDER = '<private file location>';
  * @returns the public-facing link, or the PRIVATE_FILE_PLACEHOLDER sentinel if
  *   the href cannot be signed (e.g. an S3 URL outside `/public/`)
  */
-function safePublicLink(href: string, frontendRoot: string): string {
+function safePublicLink(href: string, frontendRoot: string, destinationBucket: string): string {
   try {
     return createPublicPermalink(href, frontendRoot);
   } catch {
-    // TODO [MHS, 05/27/2026]  unsafe, check in create public permalink
-    return href
+    if (destinationBucket && href.startsWith(`s3://${destinationBucket}`)) {
+      return href
+    }
+    return PRIVATE_FILE_PLACEHOLDER
   }
 }
 
@@ -240,6 +242,7 @@ async function readBatchCatalogs(outputDir: string): Promise<WiOutputCatalogs> {
 async function resolveAllCatalogs(
   workItems: WorkItem[],
   frontendRoot: string,
+  destinationBucket: string = undefined,
 ): Promise<ResolvedCatalogs> {
   const completed_workitems = workItems.filter((wi) => COMPLETED_WORK_ITEM_STATUSES.includes(wi.status));
 
@@ -272,7 +275,7 @@ async function resolveAllCatalogs(
   const catalogHrefs = new Map<string, string[]>();
   await Promise.all(Array.from(allCatalogUrls).map(async (url) => {
     const rawHrefs = await resolveDataHrefs(url);
-    catalogHrefs.set(url, rawHrefs.map((h) => safePublicLink(h, frontendRoot)));
+    catalogHrefs.set(url, rawHrefs.map((h) => safePublicLink(h, frontendRoot, destinationBucket)));
   }));
 
   return { catalogHrefs, wiOutputCatalogs };
@@ -383,6 +386,7 @@ export async function getJobSteps(
 
     const isAdmin = await isAdminUser(req);
     const job = await getJobIfAllowed(jobID, req.user, isAdmin, req.accessToken, true);
+    const destinationBucket = job.destination_url.substring(5).split('/')[0];
 
     const steps = await getWorkflowStepsByJobId(db, jobID);
 
@@ -399,7 +403,7 @@ export async function getJobSteps(
     );
 
     const frontendRoot = getRequestRoot(req);
-    const resolvedCatalogs = await resolveAllCatalogs(workItems, frontendRoot);
+    const resolvedCatalogs = await resolveAllCatalogs(workItems, frontendRoot, destinationBucket );
     const jobSteps = await buildSteps(steps, workItems, resolvedCatalogs, q);
 
 
