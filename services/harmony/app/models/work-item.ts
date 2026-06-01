@@ -739,8 +739,6 @@ export async function workItemStatusCountsForJob(
   tx: Transaction,
   jobID: string,
 ): Promise<Map<number, { [K in WorkItemStatus]?: number }>> {
-  // NB: the local Record class (imported above) shadows TS's Record<K,V>
-  // utility, so an inline mapped type is used for the per-status counts.
   const rows = await tx(WorkItem.table)
     .select('workflowStepIndex', 'status')
     .count('id as count')
