@@ -156,17 +156,14 @@ async function resolveDataHrefs(catalogUrl: string): Promise<string[]> {
 }
 
 // Placeholder used in inputFiles / outputFiles when a STAC asset href cannot
-// be turned into a public link.
-// TODO [MHS, 05/21/2026] I don't think this will ever be used, should I keep
-// it?.  I was thinking it would be for the artifact buckets originally, but
-// only the catalogs are behind private locations.
+// be turned into a public/valid link.
 const PRIVATE_FILE_PLACEHOLDER = '<private file location>';
 
 /**
- * Convert a raw STAC asset href into the public-facing form Harmony uses
- * for job links. S3 URLs under `/public/` become `<frontendRoot>/service-results/...`
- * permalinks (which pre-sign on follow); HTTPS URLs pass through. User
- * provided S3:// url are returned for allowed locations.
+ * Convert a raw STAC asset href into the public-facing form.
+ * S3 URLs under `.../public/` become `<frontendRoot>/service-results/...`
+ * HTTPS URLs pass through.
+ * User provided S3:// urls are returned for allowed locations.
  *
  * @param href - the raw STAC asset href to convert
  * @param frontendRoot - The root URL to use when producing Harmony permalinks
@@ -187,15 +184,14 @@ export function safePublicLink(href: string, frontendRoot: string, destinationBu
 }
 
 // Per-WI output catalog list, plus how many additional catalog files (if any)
-// were dropped to keep the S3 fan-out bounded. omittedCount is 0 for regular
-// (non query-cmr) WIs, since those have exactly one output catalog.
+// were dropped to keep the S3 fan-out bounded.
 interface WiOutputCatalogs {
   urls: string[];
   omittedCount: number;
 }
 
 interface ResolvedCatalogs {
-  // Map of local catalog.json -> Array of safeLinks to file.
+  // Map of local catalog.json -> Array of public links to file.
   catalogHrefs: Map<string, string[]>;
   // Map of work item id to its output catalog list plus the omitted count.
   // fan-out steps will have more than one catalog file per WI.
@@ -203,8 +199,7 @@ interface ResolvedCatalogs {
 }
 
 /**
- * Read query-cmr's `batch-catalogs.json` (the JSON array of catalog filenames
- * it writes alongside its catalogN.json output catalogs) and return absolute
+ * Read query-cmr's `batch-catalogs.json` and return absolute
  * URLs to each. Caps the returned URLs at MAX_BATCH_CATALOGS to bound the
  * downstream per-catalog S3 reads; reports any extras as omittedCount.
  * Returns { urls: [], omittedCount: 0 } when the file isn't readable or
@@ -268,8 +263,7 @@ async function resolveAllCatalogs(
   }));
 
   // Collect every unique catalog file URL: each completed WI's
-  // input (stacCatalogLocation) plus every catalog file in its outputs.
-  // Handles the step N output == step N+1 input overlap.
+  // input (stacCatalogLocation) plus every output catalog file.
   const allCatalogUrls = new Set<string>();
   for (const wi of completed_workitems) {
     if (wi.stacCatalogLocation) allCatalogUrls.add(wi.stacCatalogLocation);
@@ -288,9 +282,8 @@ async function resolveAllCatalogs(
 /**
  * Build the work item portion of the response. inputFiles / outputFiles are
  * populated from the precomputed `resolved` maps; a WI absent from
- * `wiOutputCatalogs` (because it was incomplete when resolveAllCatalogs ran)
- * surfaces as `outputFiles: null`. WIs that never have a STAC input (e.g.
- * query-cmr step 1) always report `inputFiles: null`.
+ * `wiOutputCatalogs` displays `outputFiles: null`. WIs that never have a STAC
+ * input (e.g.  query-cmr step 1) always report `inputFiles: null`.
  *
  * @param wi - the work item to serialize
  * @param resolved - the catalog hrefs map + per-WI output catalog list
@@ -377,7 +370,8 @@ function buildSteps(
 
 /**
  * Express.js handler for GET /jobs/:jobID/steps. Returns a JSON document
- * describing the job, its workflow steps, and the inputs/outputs
+ * describing the job, its workflow steps, and the inputs/outputs of those
+ * steps.
  *
  * @param req - The request sent by the client
  * @param res - The response to send to the client
