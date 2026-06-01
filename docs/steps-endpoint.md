@@ -123,6 +123,18 @@ each one of three values:
 The handler resolves catalogs only for WIs in `COMPLETED_WORK_ITEM_STATUSES` (`successful`, `failed`, `canceled`, `warning`). Incomplete WIs have both `inputFiles` and `outputFiles` set to `null`.
 URLs are signed via the same `createPublicPermalink` path that `/jobs/:jobID` uses for `links` hrefs.
 
+#### Truncation of large query-cmr outputs
+
+Reading STAC catalogs from S3 is one round-trip per catalog file. A query-cmr work item that produced thousands of granules would force thousands of reads per page of work items, which could dominate the response time.
+
+To bound that fan-out operation, the handler caps the number of catalog files it reads per work item at `MAX_BATCH_CATALOGS` (currently 100). When a `batch-catalogs.json` lists more than that, only the first `MAX_BATCH_CATALOGS`(100) are resolved and the last element of `outputFiles` is the sentinel string:
+
+```
+"Not all files resolved, there are <N> more files not shown"
+```
+
+where `<N>` is the count of catalog files skipped (`total - MAX_BATCH_CATALOGS`). This only affects query-cmr-style work items (`wi.scrollID` set); regular service work items always have exactly one output catalog file and are never truncated.
+
 I have added a sentinal for the case where a file is created and it's somewhere we can't create a link to, not after a `/public` path in s3., that returns `<private file location>` but I'm not sure that's useful or needed.
 
 

@@ -3,8 +3,9 @@ import { before, describe, it } from 'mocha';
 import request, { Test } from 'supertest';
 
 import { JobStatus } from '../../app/models/job';
-import { WorkItemStatus } from '../../app/models/work-item-interface';
+import { getStacLocation, WorkItemStatus } from '../../app/models/work-item-interface';
 import { serializedFields as workflowStepDbFields } from '../../app/models/workflow-steps';
+import { objectStoreForProtocol } from '../../app/util/object-store';
 import { auth } from '../helpers/auth';
 import { hookTransaction } from '../helpers/db';
 import { hookRequest } from '../helpers/hooks';
@@ -45,6 +46,15 @@ const runningJob = buildJob({
   username: 'joe',
   status: JobStatus.RUNNING,
   request: 'https://harmony.example/running',
+});
+
+// Job exercising the batch-catalogs truncation path: a successful query-cmr WI
+// whose batch-catalogs.json lists more catalog files than MAX_BATCH_CATALOGS.
+const truncatedJob = buildJob({
+  username: 'joe',
+  status: JobStatus.SUCCESSFUL,
+  service_name: 'harmony-best-service',
+  request: 'https://harmony.example/truncated',
 });
 
 describe('GET /jobs/:jobID/steps', function () {
@@ -109,6 +119,35 @@ describe('GET /jobs/:jobID/steps', function () {
       status: WorkItemStatus.READY,
     });
     await runningWi.save(this.trx);
+
+    // A third job whose query-cmr WI has 105 catalog files listed in
+    // batch-catalogs.json — 5 over MAX_BATCH_CATALOGS (100). (The catalog
+    // files themselves are not staged.)
+    await truncatedJob.save(this.trx);
+    const truncatedStep = buildWorkflowStep({
+      jobID: truncatedJob.jobID,
+      stepIndex: 1,
+      serviceID: 'harmonyservices/query-cmr:latest',
+      workItemCount: 1,
+      operation: validOperation,
+    });
+    await truncatedStep.save(this.trx);
+    const truncatedWi = buildWorkItem({
+      jobID: truncatedJob.jobID,
+      workflowStepIndex: 1,
+      serviceID: 'harmonyservices/query-cmr:latest',
+      status: WorkItemStatus.SUCCESSFUL,
+      scrollID: 'fake-scroll-key',
+    });
+    await truncatedWi.save(this.trx);
+    const overCapCatalogList = Array.from({ length: 105 }, (_, i) => `catalog${i}.json`);
+    const batchUrl = getStacLocation(
+      { id: truncatedWi.id, jobID: truncatedJob.jobID },
+      'batch-catalogs.json',
+    );
+    await objectStoreForProtocol('s3').upload(
+      JSON.stringify(overCapCatalogList), batchUrl, null, 'application/json',
+    );
 
     await this.trx.commit();
   });
@@ -291,6 +330,21 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(body.pagination.lastPage).to.equal(2);
       const totalReturnedWIs = body.steps.reduce((acc, s) => acc + s.workItems.length, 0);
       expect(totalReturnedWIs).to.equal(1);
+    });
+  });
+
+  describe('When batch-catalogs.json exceeds MAX_BATCH_CATALOGS', function () {
+    hookJobSteps({ jobID: truncatedJob.jobID, username: 'joe' });
+
+    it('appends a truncation sentinel to outputFiles naming the omitted count', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      const outputFiles = body.steps[0].workItems[0].outputFiles;
+      expect(outputFiles).to.be.an('array');
+      // Last element [also the only element] is the sentinel; 105 staged - 100 cap = 5 omitted.
+      expect(outputFiles[outputFiles.length - 1]).to.equal(
+        'Not all files resolved, there are 5 more files not shown (HARMONY-2352)',
+      );
     });
   });
 

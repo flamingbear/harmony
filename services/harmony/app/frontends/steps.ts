@@ -302,7 +302,7 @@ function buildWorkItem(
     outputFiles = outputCatalogs.urls.flatMap((url) => catalogHrefs.get(url) ?? []);
     if (outputCatalogs.omittedCount > 0) {
       outputFiles.push(
-        `Not all files resolved, there are ${outputCatalogs.omittedCount} more files not shown`,
+        `Not all files resolved, there are ${outputCatalogs.omittedCount} more files not shown (HARMONY-2352)`,
       );
     }
   }
