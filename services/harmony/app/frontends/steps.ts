@@ -2,7 +2,9 @@ import { NextFunction, Response } from 'express';
 
 import HarmonyRequest from '../models/harmony-request';
 import { TEXT_LIMIT } from '../models/job';
-import WorkItem, { queryAll as queryWorkItems } from '../models/work-item';
+import WorkItem, {
+  queryAll as queryWorkItems, workItemStatusCountsForJob,
+} from '../models/work-item';
 import {
   COMPLETED_WORK_ITEM_STATUSES, getStacLocation, WorkItemQuery, WorkItemStatus,
 } from '../models/work-item-interface';
@@ -50,6 +52,9 @@ interface JobStep {
   serviceID: string;
   stepIndex: number;
   workItemCount: number;
+  // Per-status work item counts for the whole step (all pages, ignoring the
+  // ?status= filter). Only statuses with at least one work item appear.
+  statuses: Partial<Record<WorkItemStatus, number>>;
   workItems: StepWorkItem[];
   paging?: StepPaging;
 }
@@ -332,6 +337,7 @@ function buildWorkItem(
  * @param workflowSteps - all workflow steps for the job
  * @param workItems - the filtered, paginated page of work items to group
  * @param resolved - resolved-catalog data from resolveAllCatalogs
+ * @param statusCounts - per-step, per-status work item counts for the whole job
  * @param q - the parsed steps query, used to honor the ?step= filter
  * @returns the steps with their work items and any CMR call details
  */
@@ -339,6 +345,7 @@ async function buildSteps(
   workflowSteps: WorkflowStep[],
   workItems: WorkItem[],
   resolved: ResolvedCatalogs,
+  statusCounts: Map<number, Partial<Record<WorkItemStatus, number>>>,
   q: StepsQuery,
 ): Promise<JobStep[]> {
 
@@ -362,6 +369,7 @@ async function buildSteps(
       serviceID: sanitizeImage(step.serviceID),
       stepIndex: step.stepIndex,
       workItemCount: step.workItemCount,
+      statuses: statusCounts.get(step.stepIndex) ?? {},
       workItems: stepWorkItems.map((wi) => buildWorkItem(wi, resolved)),
     };
 
@@ -407,7 +415,8 @@ export async function getJobSteps(
 
     const frontendRoot = getRequestRoot(req);
     const resolvedCatalogs = await resolveAllCatalogs(workItems, frontendRoot, destinationBucket );
-    const jobSteps = await buildSteps(steps, workItems, resolvedCatalogs, q);
+    const statusCounts = await workItemStatusCountsForJob(db, jobID);
+    const jobSteps = await buildSteps(steps, workItems, resolvedCatalogs, statusCounts, q);
 
 
     const requestTruncated = !!job.request && job.request.length === TEXT_LIMIT;

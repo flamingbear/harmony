@@ -72,7 +72,7 @@ Query filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
       "workItemCount": 20,
       "statuses": {
         "successful": 19,
-        "failure": 1
+        "failed": 1
       },
       "workItems": [
         {
@@ -88,7 +88,7 @@ Query filters are pushed into the SQL `WHERE` clause via the existing `queryAll`
         },
         {
           "id": 9491416,
-          "status": "failure",
+          "status": "failed",
           "retryCount": 0,
           "inputFiles": [
             "https://harmony.example/service-results/staging-bucket/public/.../granule_xyz1.nc4"

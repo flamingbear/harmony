@@ -161,13 +161,14 @@ describe('GET /jobs/:jobID/steps', function () {
     );
 
     // A job with a destinationUrl with a data asset is an s3:// href in
-    // the user's destination bucket
+    // the user's destination bucket. Its single step has both a successful and
+    // a failed work item, so it also exercises the per-status step summary.
     await destBucketJob.save(this.trx);
     const destStep = buildWorkflowStep({
       jobID: destBucketJob.jobID,
       stepIndex: 1,
       serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
-      workItemCount: 1,
+      workItemCount: 2,
       operation: validOperation,
     });
     await destStep.save(this.trx);
@@ -178,6 +179,13 @@ describe('GET /jobs/:jobID/steps', function () {
       status: WorkItemStatus.SUCCESSFUL,
     });
     await destWi.save(this.trx);
+    const destFailedWi = buildWorkItem({
+      jobID: destBucketJob.jobID,
+      workflowStepIndex: 1,
+      serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
+      status: WorkItemStatus.FAILED,
+    });
+    await destFailedWi.save(this.trx);
     const s3 = objectStoreForProtocol('s3');
     const stacLoc = (f: string): string =>
       getStacLocation({ id: destWi.id, jobID: destBucketJob.jobID }, f);
@@ -234,13 +242,22 @@ describe('GET /jobs/:jobID/steps', function () {
     });
 
     it('exposes correct step-level state on the response', function () {
-      const expectedKeys = ['serviceID', 'stepIndex', 'workItemCount', 'workItems'];
+      const expectedKeys = ['serviceID', 'stepIndex', 'workItemCount', 'statuses', 'workItems'];
       const unexposedKeys = workflowStepDbFields.filter((f)=> !expectedKeys.includes(f))
       const body = JSON.parse(this.res.text);
       for (const step of body.steps) {
         expect(step).to.not.have.any.keys(...unexposedKeys)
         expect(step).to.have.keys(expectedKeys)
       }
+    });
+
+    it('summarizes each step with per-status work item counts', function () {
+      const body = JSON.parse(this.res.text);
+      // Step 1: one successful query-cmr WI. Step 2: one failed subsetter WI.
+      // Only non-zero statuses appear, and the keys are WorkItemStatus values
+      // ('failed', not 'failure').
+      expect(body.steps[0].statuses).to.deep.equal({ successful: 1 });
+      expect(body.steps[1].statuses).to.deep.equal({ failed: 1 });
     });
 
     it('exposes inputFiles / outputFiles fields', function () {
@@ -398,6 +415,24 @@ describe('GET /jobs/:jobID/steps', function () {
       const body = JSON.parse(this.res.text);
       const outputFiles = body.steps[0].workItems[0].outputFiles;
       expect(outputFiles).to.deep.equal(['s3://user-bucket/out/granule.nc4']);
+    });
+
+    it('summarizes both statuses present in the step', function () {
+      const body = JSON.parse(this.res.text);
+      expect(body.steps[0].statuses).to.deep.equal({ successful: 1, failed: 1 });
+    });
+  });
+
+  describe('For a mixed-status step filtered with ?status=failed', function () {
+    hookJobSteps({ jobID: destBucketJob.jobID, username: 'joe', query: { status: 'failed' } });
+
+    it('reports the whole-step summary when work items are filtered', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      const step = body.steps[0];
+      expect(step.workItems).to.have.lengthOf(1);
+      expect(step.workItems[0].status).to.equal('failed');
+      expect(step.statuses).to.deep.equal({ successful: 1, failed: 1 });
     });
   });
 
