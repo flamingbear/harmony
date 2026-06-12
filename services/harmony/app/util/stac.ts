@@ -105,10 +105,13 @@ export async function getCatalogItemUrls(catalogUrl: string): Promise<string[]> 
 /**
  * Reads the content of the catalog and returns the catalog items
  * @param catalogUrl - the catalog s3 url
+ * @param maxItems - if provided, read at most this many items (bounds the number
+ *   of S3 reads for catalogs that reference a very large number of items)
  */
-export async function readCatalogItems(catalogUrl: string): Promise<StacItem[]> {
+export async function readCatalogItems(catalogUrl: string, maxItems?: number): Promise<StacItem[]> {
   const s3 = objectStoreForProtocol('s3');
-  const childLinks = await getCatalogItemUrls(catalogUrl);
+  const itemUrls = await getCatalogItemUrls(catalogUrl);
+  const childLinks = maxItems === undefined ? itemUrls : itemUrls.slice(0, maxItems);
 
   const items: StacItem[] = [];
   for (const link of childLinks) {

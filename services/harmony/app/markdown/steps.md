@@ -15,6 +15,8 @@ As with the jobs API, there are two sets of steps API endpoints with the same su
 
 Returns the workflow steps for the given job, along with the work items processed by each step. Each step's work items are paged independently: by default up to 50 are shown per step (configurable with `limit`), and each step is navigated with its own `step<stepIndex>Page` parameter. A step with more than one page of work items includes a `paging` object with links to the other pages.
 
+A single work item can produce a very large number of output files (for example a query-cmr step that fans out to thousands of granules). To keep the response responsive, each work item's output files are themselves paged — by STAC catalog — and navigated with that work item's own `workItem<id>Page` parameter. A work item with more than one page of output files includes an `outputFilesPaging` object with links to the other pages.
+
 ##### <a name="steps-query-parameters"></a> Query Parameters
 Parameter names are case-insensitive (e.g. `step2Page`, `Step2Page`, and `STEP2PAGE` are equivalent).
 
@@ -25,6 +27,7 @@ Parameter names are case-insensitive (e.g. `step2Page`, `Step2Page`, and `STEP2P
 | workItem            | Limit the work items shown to one or more IDs, comma-separated (e.g. `workItem=123,124`). Each a positive integer.                                                                            |
 | limit               | The number of work items to show per page for each step. Defaults to 50, maximum 1000.
 | step\<stepIndex\>Page | The page of work items to show for the step with the given stepIndex, e.g. `step2Page=3`. A positive integer that defaults to 1; a page beyond the last page returns the last page. Each step pages independently, so multiple may be supplied. |
+| workItem\<id\>Page    | The page of output files to show for the work item with the given id, e.g. `workItem123Page=2`. Output files are paged by STAC catalog (10 catalogs per page) so that even very large fan-out steps (e.g. query-cmr) stay responsive. A positive integer that defaults to 1; a page beyond the last page returns the last page. Each work item pages independently, so multiple may be supplied. |
 
 ---
 **Table {{tableCounter}}** - Harmony steps endpoint parameters
@@ -84,8 +87,8 @@ Each entry in a step's `workItems` list describes a single work item:
 | status      | Status of the work item                                                                                                                                                                   |
 | retryCount  | The number of times the work item has been retried                                                                                                                                        |
 | inputFiles  | A list of links to the input files for the work item, or `null` if the work item has no STAC input (e.g. the first query-cmr step).                                                       |
-| outputFiles | A list of links to the output files produced by the work item, or `null` if it produced no output. Files that cannot be turned into a public link are shown as `<private file location>`. |
-| warning     | Warning message displayed if the outputFiles array is incomplete.                                                                                                                          |
+| outputFiles | A list of links to the output files produced by the work item for the current output-file page, or `null` if it produced no output. Files that cannot be turned into a public link are shown as `<private file location>`. |
+| outputFilesPaging | Present when the work item has more than one page of output files. Navigate the pages with the `workItem<id>Page` parameter. Same shape as a step's `paging` object — see [paging fields](#step-paging-response) (here `total` is the work item's number of output STAC catalogs). |
 
 ---
 **Table {{tableCounter}}** - Harmony work item fields
