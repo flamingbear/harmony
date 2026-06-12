@@ -26,7 +26,14 @@ import { getRequestRoot } from '../util/url';
 
 const DEFAULT_PER_PAGE = 50;
 const MAX_STEP_PAGE_SIZE = 1000;
-const MAX_BATCH_CATALOGS = 5;
+// Number of a work item's output catalogs resolved per page, navigated with the
+// per-work-item `workItem<id>Page` parameter. Bounds the S3 reads each page costs.
+const CATALOG_PAGE_SIZE = 10;
+// Upper bound on the number of items resolved from a single work item's input
+// catalog. A work item has one input catalog, but for an aggregating service that
+// catalog can list a huge number of items; this keeps the read bounded. Full
+// input pagination is a possible follow-up.
+const MAX_INPUT_CATALOG_ITEMS = 100;
 const VALID_STATUSES = Object.values(WorkItemStatus);
 
 
@@ -42,7 +49,7 @@ interface StepWorkItem {
   retryCount: number;
   inputFiles: string[] | null;
   outputFiles: string[] | null;
-  warning?: string;
+  outputFilesPaging?: StepPaging;
 }
 
 interface JobStep {
@@ -128,13 +135,15 @@ function getAllAssetHrefs(items: StacItem[]): string[] {
  * Read a STAC catalog and return every asset href it references.
  *
  * @param catalogUrl - the location of the STAC catalog to read
+ * @param maxItems - if provided, read at most this many items from the catalog
+ *   (bounds the number of S3 reads)
  * @returns the asset hrefs from the catalog, or an empty array if the catalog
  *   cannot be read (e.g. the service failed before producing it, or the
  *   catalog has no assets)
  */
-async function resolveDataHrefs(catalogUrl: string): Promise<string[]> {
+async function resolveDataHrefs(catalogUrl: string, maxItems?: number): Promise<string[]> {
   try {
-    const items = await readCatalogItems(catalogUrl);
+    const items = await readCatalogItems(catalogUrl, maxItems);
     return getAllAssetHrefs(items);
   } catch {
     return [];
@@ -169,18 +178,20 @@ export function safePublicLink(href: string, frontendRoot: string, destinationBu
   }
 }
 
-// Per-WI output catalog list, plus how many additional catalog files (if any)
-// were dropped to keep the S3 fan-out bounded.
-interface WiOutputCatalogs {
+// A work item's output catalogs for the requested page, plus the pagination
+// describing where that page sits in the full (catalog-level) result set.
+interface WiOutputPage {
+  // The output catalog URLs for the current page only.
   urls: string[];
-  omittedCount: number;
+  // Catalog-level pagination over the work item's full output catalog list.
+  pagination: ILengthAwarePagination;
 }
 
 interface ResolvedCatalogs {
   // Map of local catalog.json location -> Array of public links to file.
   catalogHrefs: Map<string, string[]>;
-  // Map of work item id to its output catalog.json list (plus the omitted count).
-  wiOutputCatalogs: Map<number, WiOutputCatalogs>;
+  // Map of work item id to its current page of output catalogs + pagination.
+  wiOutputPages: Map<number, WiOutputPage>;
 }
 
 /**
@@ -204,14 +215,13 @@ function catalogIndex(filename: string): number {
  *   - otherwise list the `catalog*.json` files in the outputs directory, which
  *     covers both the common single `catalog.json` and services that might write
  *     several `catalogN.json` files without an index.
- * The result is capped at MAX_BATCH_CATALOGS to bound the downstream S3 reads;
- * any extras are reported as omittedCount.
+ * The full ordered list is returned; the caller paginates it (its length is the
+ * work item's output catalog total).
  *
  * @param outputDir - the WI's outputs directory URL
- * @returns the (capped) catalog URLs and the count of additional catalog
- *   files that were not included
+ * @returns the ordered output catalog URLs
  */
-async function readOutputCatalogs(outputDir: string): Promise<WiOutputCatalogs> {
+async function readOutputCatalogs(outputDir: string): Promise<string[]> {
   const store = defaultObjectStore();
   const batchCatalogsUrl = `${outputDir}batch-catalogs.json`;
 
@@ -220,7 +230,7 @@ async function readOutputCatalogs(outputDir: string): Promise<WiOutputCatalogs> 
     try {
       filenames = await store.getObjectJson(batchCatalogsUrl) as string[];
     } catch {
-      return { urls: [], omittedCount: 0 };
+      return [];
     }
   } else {
     const keys = await store.listObjectKeys(outputDir);
@@ -230,79 +240,125 @@ async function readOutputCatalogs(outputDir: string): Promise<WiOutputCatalogs> 
       .sort((a, b) => catalogIndex(a) - catalogIndex(b));
   }
 
-  const capped = filenames.slice(0, MAX_BATCH_CATALOGS);
+  return filenames.map((f) => `${outputDir}${f}`);
+}
+
+/**
+ * Build a catalog-level pagination object for a work item's output catalogs,
+ * mirroring the shape knex-paginate produces so getPagingLinks can consume it.
+ * The requested page is clamped to the last page when it is beyond the end,
+ * matching the per-step paging behavior.
+ *
+ * @param total - the work item's total number of output catalogs
+ * @param requestedPage - the page requested via the work item's page parameter
+ * @returns the pagination describing the (clamped) current page
+ */
+function catalogPagination(total: number, requestedPage: number): ILengthAwarePagination {
+  const perPage = CATALOG_PAGE_SIZE;
+  const lastPage = Math.max(1, Math.ceil(total / perPage));
+  const currentPage = Math.min(requestedPage, lastPage);
+  const from = total === 0 ? 0 : (currentPage - 1) * perPage + 1;
+  const to = Math.min(currentPage * perPage, total);
   return {
-    urls: capped.map((f) => `${outputDir}${f}`),
-    omittedCount: Math.max(0, filenames.length - MAX_BATCH_CATALOGS),
+    total, lastPage, perPage, currentPage, from, to,
+    prevPage: currentPage > 1 ? currentPage - 1 : null,
+    nextPage: currentPage < lastPage ? currentPage + 1 : null,
   };
 }
 
 /**
- * For every completed work item, determine its output catalog file URLs, then
- * resolve each unique catalog URL (inputs + outputs) to public-facing data
- * hrefs.
+ * For every completed work item, determine the requested page of its output
+ * catalog file URLs, then resolve the catalogs needed for the response to
+ * public-facing data hrefs. Only the current page of each work item's output
+ * catalogs is resolved (full), and each work item's single input catalog is
+ * resolved with a bounded number of items, so the S3 reads stay bounded
+ * regardless of the size of the fan-out.
  *
+ * @param req - the Express request, used to read each work item's page parameter
  * @param workItems - the page of work items whose catalogs should be resolved
  * @param frontendRoot - the root URL to use when producing Harmony permalinks
- * @returns the per-catalog to  hrefs map and per-WI output to catalog list (see
- *   ResolvedCatalogs)
+ * @param destinationBucket - the job's destinationUrl bucket name, or undefined
+ * @returns the per-catalog hrefs map and per-WI output page (see ResolvedCatalogs)
  */
 async function resolveAllCatalogs(
+  req: HarmonyRequest,
   workItems: WorkItem[],
   frontendRoot: string,
   destinationBucket: string = undefined,
 ): Promise<ResolvedCatalogs> {
   const completed_workitems = workItems.filter((wi) => COMPLETED_WORK_ITEM_STATUSES.includes(wi.status));
 
-  // Determine each completed WI's *output* catalog file URLs
-  const wiOutputCatalogs = new Map<number, WiOutputCatalogs>();
+  // Determine each completed WI's current page of *output* catalog file URLs.
+  const wiOutputPages = new Map<number, WiOutputPage>();
   await Promise.all(completed_workitems.map(async (wi) => {
     const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
-    wiOutputCatalogs.set(wi.id, await readOutputCatalogs(outputDir));
+    const allUrls = await readOutputCatalogs(outputDir);
+    const requestedPage = parseIntegerParam(req, `workitem${wi.id}page`, 1, 1);
+    const pagination = catalogPagination(allUrls.length, requestedPage);
+    const start = (pagination.currentPage - 1) * CATALOG_PAGE_SIZE;
+    const urls = allUrls.slice(start, start + CATALOG_PAGE_SIZE);
+    wiOutputPages.set(wi.id, { urls, pagination });
   }));
-
-  // Collect every unique catalog file URL: each completed WI's
-  // input (stacCatalogLocation) plus every output catalog file.
-  const allCatalogUrls = new Set<string>();
-  for (const wi of completed_workitems) {
-    if (wi.stacCatalogLocation) allCatalogUrls.add(wi.stacCatalogLocation);
-    for (const url of wiOutputCatalogs.get(wi.id)?.urls ?? []) allCatalogUrls.add(url);
-  }
 
   const catalogHrefs = new Map<string, string[]>();
-  await Promise.all(Array.from(allCatalogUrls).map(async (url) => {
-    const rawHrefs = await resolveDataHrefs(url);
+  const resolve = async (url: string, maxItems?: number): Promise<void> => {
+    if (catalogHrefs.has(url)) return;
+    const rawHrefs = await resolveDataHrefs(url, maxItems);
     catalogHrefs.set(url, rawHrefs.map((h) => safePublicLink(h, frontendRoot, destinationBucket)));
-  }));
+  };
 
-  return { catalogHrefs, wiOutputCatalogs };
+  // Resolve the current page of output catalogs (full), then each WI's single
+  // input catalog (bounded). Outputs first so a URL that is both keeps the
+  // full output resolution.
+  const outputUrls = new Set<string>();
+  for (const wi of completed_workitems) {
+    for (const url of wiOutputPages.get(wi.id)?.urls ?? []) outputUrls.add(url);
+  }
+  await Promise.all(Array.from(outputUrls).map((url) => resolve(url)));
+
+  const inputUrls = new Set<string>();
+  for (const wi of completed_workitems) {
+    if (wi.stacCatalogLocation) inputUrls.add(wi.stacCatalogLocation);
+  }
+  await Promise.all(Array.from(inputUrls).map((url) => resolve(url, MAX_INPUT_CATALOG_ITEMS)));
+
+  return { catalogHrefs, wiOutputPages };
 }
 
 /**
  * Build the work item portion of the response. inputFiles / outputFiles are
  * populated from the precomputed `resolved` maps; a WI absent from
- * `wiOutputCatalogs` displays `outputFiles: null`. WIs that never have a STAC
- * input (e.g.  query-cmr step 1) always report `inputFiles: null`.
+ * `wiOutputPages` displays `outputFiles: null`. WIs that never have a STAC
+ * input (e.g.  query-cmr step 1) always report `inputFiles: null`. When a work
+ * item has more than one page of output catalogs, an `outputFilesPaging` block
+ * with navigation links (via the `workItem<id>Page` parameter) is included.
  *
+ * @param req - the Express request, used to build per-work-item paging links
  * @param wi - the work item to serialize
- * @param resolved - the catalog hrefs map + per-WI output catalog list
+ * @param resolved - the catalog hrefs map + per-WI output page
  * @returns the work item shaped for the steps response
  */
 function buildWorkItem(
+  req: HarmonyRequest,
   wi: WorkItem,
   resolved: ResolvedCatalogs,
 ): StepWorkItem {
-  const { catalogHrefs, wiOutputCatalogs } = resolved;
-  const outputCatalogs = wiOutputCatalogs.get(wi.id);
+  const { catalogHrefs, wiOutputPages } = resolved;
+  const outputPage = wiOutputPages.get(wi.id);
   let outputFiles: string[] | null;
-  let truncationWarning: string | undefined = undefined;
-  if (outputCatalogs === undefined) {
+  let outputFilesPaging: StepPaging | undefined = undefined;
+  if (outputPage === undefined) {
     outputFiles = null;
   } else {
-    outputFiles = outputCatalogs.urls.flatMap((url) => catalogHrefs.get(url) ?? []);
-    if (outputCatalogs.omittedCount > 0) {
-      truncationWarning = 'Not all output files are included. Only the outputs from the first ' +
-        `${outputCatalogs.urls.length} STAC catalogs were resolved, there are ${outputCatalogs.omittedCount} catalogs that were not resolved.`;
+    outputFiles = outputPage.urls.flatMap((url) => catalogHrefs.get(url) ?? []);
+    const { currentPage, lastPage, total } = outputPage.pagination;
+    if (lastPage > 1) {
+      outputFilesPaging = {
+        currentPage,
+        lastPage,
+        total,
+        links: getPagingLinks(req, outputPage.pagination, true, `workitem${wi.id}page`),
+      };
     }
   }
 
@@ -314,7 +370,7 @@ function buildWorkItem(
       ? (catalogHrefs.get(wi.stacCatalogLocation) ?? null)
       : null,
     outputFiles,
-    ...(truncationWarning !== undefined && { warning: truncationWarning }),
+    ...(outputFilesPaging !== undefined && { outputFilesPaging }),
   };
 }
 
@@ -358,7 +414,7 @@ function buildSteps(
       stepIndex: step.stepIndex,
       workItemCount: step.workItemCount,
       statuses: statusCounts.get(step.stepIndex) ?? {},
-      workItems: workItems.map((wi) => buildWorkItem(wi, resolved)),
+      workItems: workItems.map((wi) => buildWorkItem(req, wi, resolved)),
     };
     const { currentPage, lastPage, total } = pagination;
     if (lastPage > 1) {
@@ -427,7 +483,7 @@ export async function getJobSteps(
 
     const frontendRoot = getRequestRoot(req);
     const allWorkItems = stepResults.flatMap((r) => r.workItems);
-    const resolvedCatalogs = await resolveAllCatalogs(allWorkItems, frontendRoot, destinationBucket);
+    const resolvedCatalogs = await resolveAllCatalogs(req, allWorkItems, frontendRoot, destinationBucket);
     const jobSteps = buildSteps(req, stepResults, resolvedCatalogs, statusCounts, q);
 
     const responseBody = {

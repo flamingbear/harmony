@@ -35,6 +35,11 @@ const hookAdminJobSteps = hookRequest.bind(this, adminJobSteps);
 
 let wi1Id: number;
 let wi2Id: number;
+let pagedOutputWiId: number;
+
+// Number of output catalogs staged for the paged-output work item, chosen to
+// span more than one page given the 10-catalog page size (ceil(25/10) = 3).
+const PAGED_OUTPUT_CATALOGS = 25;
 
 const joeJob = buildJob({
   username: 'joe',
@@ -50,14 +55,25 @@ const runningJob = buildJob({
   request: 'https://harmony.example/running',
 });
 
-// Job exercising the batch-catalogs truncation path: a successful query-cmr WI
-// whose batch-catalogs.json lists more catalog files than MAX_BATCH_CATALOGS.
-const truncatedJob = buildJob({
+// Job exercising per-work-item output-file paging: a successful query-cmr WI
+// whose batch-catalogs.json lists more catalog files than one output page.
+const pagedOutputJob = buildJob({
   username: 'joe',
   status: JobStatus.SUCCESSFUL,
   service_name: 'harmony-best-service',
-  request: 'https://harmony.example/truncated',
+  request: 'https://harmony.example/paged-output',
 });
+
+// Job whose single work item has an input catalog referencing more items than
+// MAX_INPUT_CATALOG_ITEMS, to verify the input read is bounded.
+const inputBoundJob = buildJob({
+  username: 'joe',
+  status: JobStatus.SUCCESSFUL,
+  service_name: 'harmony-best-service',
+  request: 'https://harmony.example/input-bound',
+});
+// Keep in sync with MAX_INPUT_CATALOG_ITEMS in app/frontends/steps.ts.
+const MAX_INPUT_CATALOG_ITEMS = 100;
 
 // Job written to a user-supplied destinationUrl bucket: its output catalog's
 // data asset is an s3:// href that createPublicPermalink can't sign (not under
@@ -162,34 +178,81 @@ describe('GET /jobs/:jobID/steps', function () {
     });
     await runningWi.save(this.trx);
 
-    // A third job whose query-cmr WI has 105 catalog files listed in
-    // batch-catalogs.json — 5 over MAX_BATCH_CATALOGS (5). (The catalog
-    // files themselves are not staged.)
-    await truncatedJob.save(this.trx);
-    const truncatedStep = buildWorkflowStep({
-      jobID: truncatedJob.jobID,
+    // A third job whose query-cmr WI fans out to PAGED_OUTPUT_CATALOGS catalog
+    // files, each referencing one item with one data asset. Both the
+    // batch-catalogs.json index and every catalog/item file are staged so
+    // output-file paging resolves real hrefs across multiple pages.
+    await pagedOutputJob.save(this.trx);
+    const pagedOutputStep = buildWorkflowStep({
+      jobID: pagedOutputJob.jobID,
       stepIndex: 1,
       serviceID: 'harmonyservices/query-cmr:latest',
       workItemCount: 1,
       operation: validOperation,
     });
-    await truncatedStep.save(this.trx);
-    const truncatedWi = buildWorkItem({
-      jobID: truncatedJob.jobID,
+    await pagedOutputStep.save(this.trx);
+    const pagedOutputWi = buildWorkItem({
+      jobID: pagedOutputJob.jobID,
       workflowStepIndex: 1,
       serviceID: 'harmonyservices/query-cmr:latest',
       status: WorkItemStatus.SUCCESSFUL,
       scrollID: 'fake-scroll-key',
     });
-    await truncatedWi.save(this.trx);
-    const overCapCatalogList = Array.from({ length: 100 }, (_, i) => `catalog${i}.json`);
-    const batchUrl = getStacLocation(
-      { id: truncatedWi.id, jobID: truncatedJob.jobID },
-      'batch-catalogs.json',
+    await pagedOutputWi.save(this.trx);
+    pagedOutputWiId = pagedOutputWi.id;
+    const pagedStore = objectStoreForProtocol('s3');
+    const pagedLoc = (f: string): string =>
+      getStacLocation({ id: pagedOutputWi.id, jobID: pagedOutputJob.jobID }, f);
+    const catalogList = Array.from({ length: PAGED_OUTPUT_CATALOGS }, (_, i) => `catalog${i}.json`);
+    await pagedStore.upload(
+      JSON.stringify(catalogList), pagedLoc('batch-catalogs.json'), null, 'application/json',
     );
-    await objectStoreForProtocol('s3').upload(
-      JSON.stringify(overCapCatalogList), batchUrl, null, 'application/json',
-    );
+    for (let i = 0; i < PAGED_OUTPUT_CATALOGS; i++) {
+      await pagedStore.upload(JSON.stringify({
+        stac_version: '1.0.0', id: `cat${i}`, description: 'c',
+        links: [{ rel: 'item', href: `./item${i}.json` }],
+      }), pagedLoc(`catalog${i}.json`), null, 'application/json');
+      await pagedStore.upload(JSON.stringify({
+        stac_version: '1.0.0', id: `item${i}`, type: 'Feature',
+        geometry: null, properties: {}, links: [],
+        assets: { data: { href: `https://example.com/granule${i}.nc4`, roles: ['data'] } },
+      }), pagedLoc(`item${i}.json`), null, 'application/json');
+    }
+
+    // A job whose work item's input catalog references more items than
+    // MAX_INPUT_CATALOG_ITEMS. Only the first MAX_INPUT_CATALOG_ITEMS item files
+    // are staged (the rest are sliced off before any read), so a correct bound
+    // resolves exactly that many input files.
+    await inputBoundJob.save(this.trx);
+    const inputBoundStep = buildWorkflowStep({
+      jobID: inputBoundJob.jobID,
+      stepIndex: 1,
+      serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
+      workItemCount: 1,
+      operation: validOperation,
+    });
+    await inputBoundStep.save(this.trx);
+    const inputCatalogUrl = `s3://artifacts/${inputBoundJob.jobID}/input/catalog.json`;
+    const inputBoundWi = buildWorkItem({
+      jobID: inputBoundJob.jobID,
+      workflowStepIndex: 1,
+      serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
+      status: WorkItemStatus.SUCCESSFUL,
+      stacCatalogLocation: inputCatalogUrl,
+    });
+    await inputBoundWi.save(this.trx);
+    const inputStore = objectStoreForProtocol('s3');
+    const overCapItemCount = MAX_INPUT_CATALOG_ITEMS + 5;
+    await inputStore.upload(JSON.stringify({
+      stac_version: '1.0.0', id: 'input-cat', description: 'c',
+      links: Array.from({ length: overCapItemCount }, (_, i) => ({ rel: 'item', href: `./item${i}.json` })),
+    }), inputCatalogUrl, null, 'application/json');
+    await Promise.all(Array.from({ length: MAX_INPUT_CATALOG_ITEMS }, (_, i) =>
+      inputStore.upload(JSON.stringify({
+        stac_version: '1.0.0', id: `input-item${i}`, type: 'Feature',
+        geometry: null, properties: {}, links: [],
+        assets: { data: { href: `https://example.com/input${i}.nc4`, roles: ['data'] } },
+      }), `s3://artifacts/${inputBoundJob.jobID}/input/item${i}.json`, null, 'application/json')));
 
     // A job with a destinationUrl with a data asset is an s3:// href in
     // the user's destination bucket. Its single step has both a successful and
@@ -548,16 +611,75 @@ describe('GET /jobs/:jobID/steps', function () {
     });
   });
 
-  describe('When batch-catalogs.json exceeds MAX_BATCH_CATALOGS', function () {
-    hookJobSteps({ jobID: truncatedJob.jobID, username: 'joe' });
+  describe('For a work item with more than one page of output catalogs', function () {
+    hookJobSteps({ jobID: pagedOutputJob.jobID, username: 'joe' });
 
-    it('includes a truncation warning when outputFiles in incomplete', function () {
+    it('returns only the first page of output files and an outputFilesPaging block', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
-      const { outputFiles, warning } = body.steps[0].workItems[0];
-      expect(outputFiles).to.be.an('array');
-      expect(warning).to.equal('Not all output files are included. Only the outputs from the first ' +
-        '5 STAC catalogs were resolved, there are 95 catalogs that were not resolved.');
+      const wi = body.steps[0].workItems[0];
+      // 25 catalogs over a 10-catalog page: page 1 resolves exactly 10 files
+      // (one data asset per catalog), proving the rest were not read.
+      expect(wi.outputFiles).to.have.lengthOf(10);
+      expect(wi.outputFiles[0]).to.equal('https://example.com/granule0.nc4');
+      expect(wi.outputFiles[9]).to.equal('https://example.com/granule9.nc4');
+      expect(wi.outputFilesPaging.currentPage).to.equal(1);
+      expect(wi.outputFilesPaging.lastPage).to.equal(3); // ceil(25 / 10)
+      expect(wi.outputFilesPaging.total).to.equal(25);
+      const next = wi.outputFilesPaging.links.find((l) => l.rel === 'next');
+      expect(next.href).to.include(`workitem${pagedOutputWiId}page=2`);
+      expect(wi.outputFilesPaging.links.find((l) => l.rel === 'prev')).to.be.undefined;
+    });
+  });
+
+  describe('Requesting the last page of a work item\'s output files', function () {
+    before(async function () {
+      this.res = await jobSteps(this.frontend, {
+        jobID: pagedOutputJob.jobID, query: { [`workItem${pagedOutputWiId}Page`]: 3 },
+      }).use(auth({ username: 'joe' }));
+    });
+    after(function () { delete this.res; });
+
+    it('returns the remaining output files with prev/first links and no next', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      const wi = body.steps[0].workItems[0];
+      expect(wi.outputFiles).to.have.lengthOf(5); // catalogs 20..24
+      expect(wi.outputFiles[0]).to.equal('https://example.com/granule20.nc4');
+      expect(wi.outputFilesPaging.currentPage).to.equal(3);
+      expect(wi.outputFilesPaging.links.find((l) => l.rel === 'prev').href)
+        .to.include(`workitem${pagedOutputWiId}page=2`);
+      expect(wi.outputFilesPaging.links.find((l) => l.rel === 'next')).to.be.undefined;
+    });
+  });
+
+  describe('Requesting an output-file page past the last page', function () {
+    before(async function () {
+      this.res = await jobSteps(this.frontend, {
+        jobID: pagedOutputJob.jobID, query: { [`workItem${pagedOutputWiId}Page`]: 9 },
+      }).use(auth({ username: 'joe' }));
+    });
+    after(function () { delete this.res; });
+
+    it('returns the last page instead of an empty page', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      const wi = body.steps[0].workItems[0];
+      expect(wi.outputFiles).to.have.lengthOf(5);
+      expect(wi.outputFilesPaging.currentPage).to.equal(3);
+      expect(wi.outputFilesPaging.lastPage).to.equal(3);
+    });
+  });
+
+  describe('For a work item whose input catalog exceeds the input item bound', function () {
+    hookJobSteps({ jobID: inputBoundJob.jobID, username: 'joe' });
+
+    it('resolves at most MAX_INPUT_CATALOG_ITEMS input files', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      const wi = body.steps[0].workItems[0];
+      expect(wi.inputFiles).to.have.lengthOf(MAX_INPUT_CATALOG_ITEMS);
+      expect(wi.inputFiles[0]).to.equal('https://example.com/input0.nc4');
     });
   });
 
@@ -567,9 +689,10 @@ describe('GET /jobs/:jobID/steps', function () {
     it('displays a generic asset and passes the destination-bucket href through', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
-      const { outputFiles, warning } = body.steps[0].workItems[0];
-      expect(outputFiles).to.deep.equal(['s3://user-bucket/out/granule_reformatted.tif']);
-      expect(warning).not.to.exist;
+      const workItem = body.steps[0].workItems[0];
+      expect(workItem.outputFiles).to.deep.equal(['s3://user-bucket/out/granule_reformatted.tif']);
+      // A single output catalog means there is only one page, so no paging block.
+      expect(workItem).to.not.have.property('outputFilesPaging');
     });
 
     it('summarizes both statuses present in the step', function () {
