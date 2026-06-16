@@ -236,7 +236,7 @@ function validateEdrParameterNames(req: HarmonyRequest): void {
  * @throws RequestValidationError - if disallowed parameters are detected
  */
 export function validateStepsParameterNames(req: HarmonyRequest): void {
-  const stepsAllowedParams = ['step', 'status', 'workItem', 'limit', 'wilimit'];
+  const stepsAllowedParams = ['step', 'status', 'workItem', 'limit', 'wiLimit'];
   const stepPageParamRegex = /^step\d+page$/;
   const workItemPageParamRegex = /^workitem\d+page$/;
 

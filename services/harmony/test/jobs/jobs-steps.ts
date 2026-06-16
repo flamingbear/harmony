@@ -632,6 +632,24 @@ describe('GET /jobs/:jobID/steps', function () {
     });
   });
 
+  describe('When ?wiLimit= overrides the output-catalog page size', function () {
+    hookJobSteps({ jobID: pagedOutputJob.jobID, username: 'joe', query: { wiLimit: 5 } });
+
+    it('pages the output files using the requested size', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      const wi = body.steps[0].workItems[0];
+      // 25 catalogs over a 5-catalog page: page 1 resolves exactly 5 files.
+      expect(wi.outputFiles).to.have.lengthOf(5);
+      expect(wi.outputFiles[0]).to.equal('https://example.com/granule0.nc4');
+      expect(wi.outputFiles[4]).to.equal('https://example.com/granule4.nc4');
+      expect(wi.outputFilesPaging.currentPage).to.equal(1);
+      expect(wi.outputFilesPaging.lastPage).to.equal(5); // ceil(25 / 5)
+      expect(wi.outputFilesPaging.total).to.equal(25);
+    });
+
+  });
+
   describe('Requesting the last page of a work item\'s output files', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
@@ -899,7 +917,7 @@ describe('GET /jobs/:jobID/steps', function () {
         const response = JSON.parse(this.res.text);
         expect(response).to.eql({
           code: 'harmony.RequestValidationError',
-          description: 'Error: Invalid parameter(s): staus. Allowed parameters are: step, status, workItem, and limit.',
+          description: 'Error: Invalid parameter(s): staus. Allowed parameters are: step, status, workItem, limit, and wiLimit.',
         });
       });
     });
