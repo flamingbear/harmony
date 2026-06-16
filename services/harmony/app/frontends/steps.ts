@@ -28,9 +28,10 @@ import { getRequestRoot } from '../util/url';
 const DEFAULT_WORKITEMS_PER_PAGE = 50;
 const MAX_WORKITEMS_PER_PAGE = 1000;
 
-// Number of a work item's output catalogs resolved per page, navigated with the
-// per-work-item `workItem<id>Page` parameter. Bounds the S3 reads each page costs.
-const CATALOG_PAGE_SIZE = 2;
+// Default number of a work item's output catalogs resolved per page, navigated with the
+// per-work-item `workItem<id>Page` parameter and overridable via the `wiLimit` query
+// parameter. Bounds the S3 reads each page costs.
+const CATALOG_PAGE_SIZE = 10;
 // Upper bound on the number of items resolved from a single work item's input
 // catalog. A work item has one input catalog, but for an aggregating service that
 // catalog can list a huge number of items; this keeps the read bounded. Full
@@ -328,7 +329,7 @@ async function resolveAllCatalogs(
   await Promise.all(Array.from(inputUrls).map((url) => resolve(url, MAX_INPUT_CATALOG_ITEMS)));
 
   const durationMs = new Date().getTime() - startTime;
-  req.context.logger.info(`Finished steps:resolveAllCatalogs`, {durationMs});
+  req.context.logger.info('Finished steps:resolveAllCatalogs', { durationMs });
   return { catalogHrefs, wiOutputPages };
 }
 
@@ -506,7 +507,7 @@ export async function getJobSteps(
       steps: jobSteps,
     };
     const durationMs = new Date().getTime() - startTime;
-    req.context.logger.info(`Finished /steps for ${jobID}`, {durationMs});
+    req.context.logger.info(`Finished /steps for ${jobID}`, { durationMs });
     res.json(responseBody);
   } catch (e) {
     req.context.logger.error(e);

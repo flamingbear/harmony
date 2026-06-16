@@ -1,5 +1,6 @@
-import { objectStoreForProtocol } from './object-store';
 import { Logger } from 'winston';
+
+import { objectStoreForProtocol } from './object-store';
 import { resolve } from './url';
 import JobLink from '../models/job-link';
 
@@ -112,8 +113,8 @@ export async function getCatalogItemUrls(catalogUrl: string): Promise<string[]> 
 export async function readCatalogItems(catalogUrl: string, maxItems?: number, logger?: Logger): Promise<StacItem[]> {
   const s3 = objectStoreForProtocol('s3');
   const itemUrls = await getCatalogItemUrls(catalogUrl);
-  logger.info(`readCatalogItems found ${itemUrls.length} items in CatalogUrl ${catalogUrl}.`);
-  logger.info(`readCatalogItems urls: ${JSON.stringify(itemUrls)}`);
+  logger?.info(`readCatalogItems found ${itemUrls.length} items in CatalogUrl ${catalogUrl}.`);
+  logger?.info(`readCatalogItems urls: ${JSON.stringify(itemUrls)}`);
   const childLinks = maxItems === undefined ? itemUrls : itemUrls.slice(0, maxItems);
 
   const items: StacItem[] = [];
