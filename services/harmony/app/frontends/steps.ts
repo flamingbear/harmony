@@ -24,8 +24,9 @@ import { parseMultiValueParameter } from '../util/parameter-parsing-helpers';
 import { readCatalogItems, StacItem } from '../util/stac';
 import { getRequestRoot } from '../util/url';
 
-const DEFAULT_PER_PAGE = 50;
-const MAX_STEP_PAGE_SIZE = 1000;
+const DEFAULT_WORKITEMS_PER_PAGE = 50;
+const MAX_WORKITEMS_PER_PAGE = 1000;
+
 // Number of a work item's output catalogs resolved per page, navigated with the
 // per-work-item `workItem<id>Page` parameter. Bounds the S3 reads each page costs.
 const CATALOG_PAGE_SIZE = 10;
@@ -467,7 +468,7 @@ export async function getJobSteps(
 
     // Bound every page result by 'limit' and page each step independently
     // via step<stepIndex>Page parameter.
-    const limit = parseIntegerParam(req, 'limit', DEFAULT_PER_PAGE, 1, MAX_STEP_PAGE_SIZE, true, true);
+    const limit = parseIntegerParam(req, 'limit', DEFAULT_WORKITEMS_PER_PAGE, 1, MAX_WORKITEMS_PER_PAGE, true, true);
     const stepResults: StepWorkItems[] = await Promise.all(selectedSteps.map(async (step) => {
       const where: WorkItemQuery['where'] = { jobID, workflowStepIndex: step.stepIndex };
       const whereIn: WorkItemQuery['whereIn'] = {};
