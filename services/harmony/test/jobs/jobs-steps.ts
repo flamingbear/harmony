@@ -36,6 +36,8 @@ const hookAdminJobSteps = hookRequest.bind(this, adminJobSteps);
 let wi1Id: number;
 let wi2Id: number;
 let pagedOutputWiId: number;
+let inputPagedWiId: number;
+let destWiId: number;
 
 // Number of output catalogs staged for the paged-output work item, chosen to
 // span more than one page given the 10-catalog page size (ceil(25/10) = 3).
@@ -64,16 +66,17 @@ const pagedOutputJob = buildJob({
   request: 'https://harmony.example/paged-output',
 });
 
-// Job whose single work item has an input catalog referencing more items than
-// MAX_INPUT_CATALOG_ITEMS, to verify the input read is bounded.
-const inputBoundJob = buildJob({
+// Job whose single work item has an input catalog referencing more items than one
+// input page, to exercise per-work-item input-file paging in resolve mode.
+const inputPagedJob = buildJob({
   username: 'joe',
   status: JobStatus.SUCCESSFUL,
   service_name: 'harmony-best-service',
-  request: 'https://harmony.example/input-bound',
+  request: 'https://harmony.example/input-paged',
 });
-// Keep in sync with MAX_INPUT_CATALOG_ITEMS in app/frontends/steps.ts.
-const MAX_INPUT_CATALOG_ITEMS = 100;
+// Number of items the input catalog references, chosen to span more than one page
+// given the 10-item page size (ceil(25/10) = 3).
+const INPUT_CATALOG_ITEMS = 25;
 
 // Job written to a user-supplied destinationUrl bucket: its output catalog's
 // data asset is an s3:// href that createPublicPermalink can't sign (not under
@@ -219,40 +222,39 @@ describe('GET /jobs/:jobID/steps', function () {
       }), pagedLoc(`item${i}.json`), null, 'application/json');
     }
 
-    // A job whose work item's input catalog references more items than
-    // MAX_INPUT_CATALOG_ITEMS. Only the first MAX_INPUT_CATALOG_ITEMS item files
-    // are staged (the rest are sliced off before any read), so a correct bound
-    // resolves exactly that many input files.
-    await inputBoundJob.save(this.trx);
-    const inputBoundStep = buildWorkflowStep({
-      jobID: inputBoundJob.jobID,
+    // A job whose work item's input catalog references INPUT_CATALOG_ITEMS items,
+    // spanning more than one input page. The catalog and every item file are staged
+    // so input-file paging (resolve mode) resolves real hrefs across pages.
+    await inputPagedJob.save(this.trx);
+    const inputPagedStep = buildWorkflowStep({
+      jobID: inputPagedJob.jobID,
       stepIndex: 1,
       serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
       workItemCount: 1,
       operation: validOperation,
     });
-    await inputBoundStep.save(this.trx);
-    const inputCatalogUrl = `s3://artifacts/${inputBoundJob.jobID}/input/catalog.json`;
-    const inputBoundWi = buildWorkItem({
-      jobID: inputBoundJob.jobID,
+    await inputPagedStep.save(this.trx);
+    const inputCatalogUrl = `s3://artifacts/${inputPagedJob.jobID}/input/catalog.json`;
+    const inputPagedWi = buildWorkItem({
+      jobID: inputPagedJob.jobID,
       workflowStepIndex: 1,
       serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
       status: WorkItemStatus.SUCCESSFUL,
       stacCatalogLocation: inputCatalogUrl,
     });
-    await inputBoundWi.save(this.trx);
+    await inputPagedWi.save(this.trx);
+    inputPagedWiId = inputPagedWi.id;
     const inputStore = objectStoreForProtocol('s3');
-    const overCapItemCount = MAX_INPUT_CATALOG_ITEMS + 5;
     await inputStore.upload(JSON.stringify({
       stac_version: '1.0.0', id: 'input-cat', description: 'c',
-      links: Array.from({ length: overCapItemCount }, (_, i) => ({ rel: 'item', href: `./item${i}.json` })),
+      links: Array.from({ length: INPUT_CATALOG_ITEMS }, (_, i) => ({ rel: 'item', href: `./item${i}.json` })),
     }), inputCatalogUrl, null, 'application/json');
-    await Promise.all(Array.from({ length: MAX_INPUT_CATALOG_ITEMS }, (_, i) =>
+    await Promise.all(Array.from({ length: INPUT_CATALOG_ITEMS }, (_, i) =>
       inputStore.upload(JSON.stringify({
         stac_version: '1.0.0', id: `input-item${i}`, type: 'Feature',
         geometry: null, properties: {}, links: [],
         assets: { data: { href: `https://example.com/input${i}.nc4`, roles: ['data'] } },
-      }), `s3://artifacts/${inputBoundJob.jobID}/input/item${i}.json`, null, 'application/json')));
+      }), `s3://artifacts/${inputPagedJob.jobID}/input/item${i}.json`, null, 'application/json')));
 
     // A job with a destinationUrl with a data asset is an s3:// href in
     // the user's destination bucket. Its single step has both a successful and
@@ -273,6 +275,7 @@ describe('GET /jobs/:jobID/steps', function () {
       status: WorkItemStatus.SUCCESSFUL,
     });
     await destWi.save(this.trx);
+    destWiId = destWi.id;
     const destFailedWi = buildWorkItem({
       jobID: destBucketJob.jobID,
       workflowStepIndex: 1,
@@ -435,17 +438,22 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(body.steps[1].statuses).to.deep.equal({ failed: 1 });
     });
 
-    it('exposes inputFiles / outputFiles fields', function () {
+    it('exposes link-only inputFilesUrl / outputFilesUrl fields and no inline files', function () {
       const body = JSON.parse(this.res.text);
       const wi1 = body.steps[0].workItems[0];
       const wi2 = body.steps[1].workItems[0];
-      expect(wi1).to.have.property('inputFiles');
-      expect(wi1).to.have.property('outputFiles');
-      expect(wi1.inputFiles).to.be.null;
-      expect(wi1.outputFiles).to.be.an('array');
-      expect(wi2).to.have.property('inputFiles');
-      expect(wi2.inputFiles).to.be.an('array');
-      expect(wi2).to.have.property('outputFiles');
+      // The overview does no S3 reads: it never embeds inline files.
+      expect(wi1).to.not.have.property('inputFiles');
+      expect(wi1).to.not.have.property('outputFiles');
+      // wi1 (query-cmr, successful, no STAC input): no input link, output link present.
+      expect(wi1.inputFilesUrl).to.be.null;
+      expect(wi1.outputFilesUrl).to.include(`workitem=${wi1Id}`);
+      expect(wi1.outputFilesUrl).to.include('resolvefiles=output');
+      // wi2 (failed, has an input catalog): both links present (failed is completed).
+      expect(wi2.inputFilesUrl).to.include(`workitem=${wi2Id}`);
+      expect(wi2.inputFilesUrl).to.include('resolvefiles=input');
+      expect(wi2.outputFilesUrl).to.include(`workitem=${wi2Id}`);
+      expect(wi2.outputFilesUrl).to.include('resolvefiles=output');
     });
 
   });
@@ -531,13 +539,14 @@ describe('GET /jobs/:jobID/steps', function () {
 
   describe('For a job whose work item is still incomplete', function () {
     hookJobSteps({ jobID: runningJob.jobID, username: 'joe' });
-    it('leaves outputFiles as null and does not attempt resolution', function () {
+    it('leaves both file links null (no input, not yet completed)', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
       expect(wi.status).to.equal('ready');
-      expect(wi.outputFiles).to.equal(null);
-      expect(wi.inputFiles).to.equal(null);
+      // Not completed -> no output link; no STAC input -> no input link.
+      expect(wi.outputFilesUrl).to.equal(null);
+      expect(wi.inputFilesUrl).to.equal(null);
     });
   });
 
@@ -611,8 +620,13 @@ describe('GET /jobs/:jobID/steps', function () {
     });
   });
 
-  describe('For a work item with more than one page of output catalogs', function () {
-    hookJobSteps({ jobID: pagedOutputJob.jobID, username: 'joe' });
+  describe('Resolving a work item with more than one page of output catalogs', function () {
+    before(async function () {
+      this.res = await jobSteps(this.frontend, {
+        jobID: pagedOutputJob.jobID, query: { workItem: pagedOutputWiId, resolveFiles: 'output' },
+      }).use(auth({ username: 'joe' }));
+    });
+    after(function () { delete this.res; });
 
     it('returns only the first page of output files and an outputFilesPaging block', function () {
       expect(this.res.statusCode).to.equal(200);
@@ -633,7 +647,12 @@ describe('GET /jobs/:jobID/steps', function () {
   });
 
   describe('When ?wiLimit= overrides the output-catalog page size', function () {
-    hookJobSteps({ jobID: pagedOutputJob.jobID, username: 'joe', query: { wiLimit: 5 } });
+    before(async function () {
+      this.res = await jobSteps(this.frontend, {
+        jobID: pagedOutputJob.jobID, query: { workItem: pagedOutputWiId, resolveFiles: 'output', wiLimit: 5 },
+      }).use(auth({ username: 'joe' }));
+    });
+    after(function () { delete this.res; });
 
     it('pages the output files using the requested size', function () {
       expect(this.res.statusCode).to.equal(200);
@@ -653,7 +672,8 @@ describe('GET /jobs/:jobID/steps', function () {
   describe('Requesting the last page of a work item\'s output files', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
-        jobID: pagedOutputJob.jobID, query: { [`workItem${pagedOutputWiId}Page`]: 3 },
+        jobID: pagedOutputJob.jobID,
+        query: { workItem: pagedOutputWiId, resolveFiles: 'output', [`workItem${pagedOutputWiId}Page`]: 3 },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -674,7 +694,8 @@ describe('GET /jobs/:jobID/steps', function () {
   describe('Requesting an output-file page past the last page', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
-        jobID: pagedOutputJob.jobID, query: { [`workItem${pagedOutputWiId}Page`]: 9 },
+        jobID: pagedOutputJob.jobID,
+        query: { workItem: pagedOutputWiId, resolveFiles: 'output', [`workItem${pagedOutputWiId}Page`]: 9 },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -689,20 +710,80 @@ describe('GET /jobs/:jobID/steps', function () {
     });
   });
 
-  describe('For a work item whose input catalog exceeds the input item bound', function () {
-    hookJobSteps({ jobID: inputBoundJob.jobID, username: 'joe' });
+  describe('Resolving a work item with more than one page of input items', function () {
+    before(async function () {
+      this.res = await jobSteps(this.frontend, {
+        jobID: inputPagedJob.jobID, query: { workItem: inputPagedWiId, resolveFiles: 'input' },
+      }).use(auth({ username: 'joe' }));
+    });
+    after(function () { delete this.res; });
 
-    it('resolves at most MAX_INPUT_CATALOG_ITEMS input files', function () {
+    it('returns only the first page of input files and an inputFilesPaging block', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
-      expect(wi.inputFiles).to.have.lengthOf(MAX_INPUT_CATALOG_ITEMS);
+      // 25 items over a 10-item page: page 1 reads exactly 10 items, proving the
+      // rest were not read.
+      expect(wi.inputFiles).to.have.lengthOf(10);
       expect(wi.inputFiles[0]).to.equal('https://example.com/input0.nc4');
+      expect(wi.inputFiles[9]).to.equal('https://example.com/input9.nc4');
+      expect(wi.inputFilesPaging.currentPage).to.equal(1);
+      expect(wi.inputFilesPaging.lastPage).to.equal(3); // ceil(25 / 10)
+      expect(wi.inputFilesPaging.total).to.equal(25);
+      const next = wi.inputFilesPaging.links.find((l) => l.rel === 'next');
+      expect(next.href).to.include(`workitem${inputPagedWiId}inputpage=2`);
+      expect(wi.inputFilesPaging.links.find((l) => l.rel === 'prev')).to.be.undefined;
+    });
+  });
+
+  describe('Requesting the last page of a work item\'s input files', function () {
+    before(async function () {
+      this.res = await jobSteps(this.frontend, {
+        jobID: inputPagedJob.jobID,
+        query: { workItem: inputPagedWiId, resolveFiles: 'input', [`workItem${inputPagedWiId}InputPage`]: 3 },
+      }).use(auth({ username: 'joe' }));
+    });
+    after(function () { delete this.res; });
+
+    it('returns the remaining input files with a prev link and no next', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      const wi = body.steps[0].workItems[0];
+      expect(wi.inputFiles).to.have.lengthOf(5); // items 20..24
+      expect(wi.inputFiles[0]).to.equal('https://example.com/input20.nc4');
+      expect(wi.inputFilesPaging.currentPage).to.equal(3);
+      expect(wi.inputFilesPaging.links.find((l) => l.rel === 'prev').href)
+        .to.include(`workitem${inputPagedWiId}inputpage=2`);
+      expect(wi.inputFilesPaging.links.find((l) => l.rel === 'next')).to.be.undefined;
+    });
+  });
+
+  describe('Requesting an input-file page past the last page', function () {
+    before(async function () {
+      this.res = await jobSteps(this.frontend, {
+        jobID: inputPagedJob.jobID,
+        query: { workItem: inputPagedWiId, resolveFiles: 'input', [`workItem${inputPagedWiId}InputPage`]: 9 },
+      }).use(auth({ username: 'joe' }));
+    });
+    after(function () { delete this.res; });
+
+    it('returns the last page instead of an empty page', function () {
+      expect(this.res.statusCode).to.equal(200);
+      const body = JSON.parse(this.res.text);
+      const wi = body.steps[0].workItems[0];
+      expect(wi.inputFiles).to.have.lengthOf(5);
+      expect(wi.inputFilesPaging.currentPage).to.equal(3);
+      expect(wi.inputFilesPaging.lastPage).to.equal(3);
     });
   });
 
   describe('For a job written to a user destinationUrl bucket', function () {
-    hookJobSteps({ jobID: destBucketJob.jobID, username: 'joe' });
+    before(async function () {
+      this.res = await jobSteps(this.frontend, {
+        jobID: destBucketJob.jobID, query: { workItem: destWiId, resolveFiles: 'output' },
+      }).use(auth({ username: 'joe' }));
+    });
+    after(function () { delete this.res; });
 
     it('displays a generic asset and passes the destination-bucket href through', function () {
       expect(this.res.statusCode).to.equal(200);
@@ -917,8 +998,45 @@ describe('GET /jobs/:jobID/steps', function () {
         const response = JSON.parse(this.res.text);
         expect(response).to.eql({
           code: 'harmony.RequestValidationError',
-          description: 'Error: Invalid parameter(s): staus. Allowed parameters are: step, status, workItem, limit, and wiLimit.',
+          description: 'Error: Invalid parameter(s): staus. Allowed parameters are: step, status, workItem, limit, wiLimit, and resolveFiles.',
         });
+      });
+    });
+
+    describe('?resolveFiles=bogus (invalid value)', function () {
+      hookJobSteps({
+        jobID: joeJob.jobID, username: 'joe', query: { workItem: 1, resolveFiles: 'bogus' },
+      });
+      it('returns 400', function () {
+        expect(this.res.statusCode).to.equal(400);
+      });
+    });
+
+    describe('?resolveFiles=input without a workItem filter', function () {
+      hookJobSteps({ jobID: joeJob.jobID, username: 'joe', query: { resolveFiles: 'input' } });
+      it('returns 400', function () {
+        expect(this.res.statusCode).to.equal(400);
+      });
+
+      it('explains that exactly one workItem is required', function () {
+        const response = JSON.parse(this.res.text);
+        expect(response).to.eql({
+          code: 'harmony.RequestValidationError',
+          description: 'Error: resolveFiles requires exactly one workItem',
+        });
+      });
+    });
+
+    describe('?resolveFiles=input with more than one workItem', function () {
+      before(async function () {
+        this.res = await jobSteps(this.frontend, {
+          jobID: joeJob.jobID, query: { workItem: `${wi1Id},${wi2Id}`, resolveFiles: 'input' },
+        }).use(auth({ username: 'joe' }));
+      });
+      after(function () { delete this.res; });
+
+      it('returns 400', function () {
+        expect(this.res.statusCode).to.equal(400);
       });
     });
 

@@ -128,6 +128,37 @@ export async function readCatalogItems(catalogUrl: string, maxItems?: number, lo
 }
 
 /**
+ * Reads a single page of a STAC catalog's items. The catalog itself is read once
+ * to enumerate every item URL (cheap, a single S3 read), and only the requested
+ * `[offset, offset + limit)` slice of items is fetched. This keeps the number of
+ * S3 reads bounded for catalogs that reference a very large number of items.
+ *
+ * @param catalogUrl - the catalog s3 url
+ * @param offset - the index of the first item to read
+ * @param limit - the maximum number of items to read
+ * @param logger - optional logger
+ * @returns the page of items and the catalog's total item count
+ */
+export async function readCatalogItemsPage(
+  catalogUrl: string, offset: number, limit: number, logger?: Logger,
+): Promise<{ items: StacItem[]; total: number }> {
+  const s3 = objectStoreForProtocol('s3');
+  const itemUrls = await getCatalogItemUrls(catalogUrl);
+  const total = itemUrls.length;
+  const pageUrls = itemUrls.slice(offset, offset + limit);
+  logger?.info(`readCatalogItemsPage reading ${pageUrls.length} of ${total} items (offset ${offset}) in CatalogUrl ${catalogUrl}.`);
+
+  const items: StacItem[] = [];
+  for (const link of pageUrls) {
+    const itemUrl = resolve(catalogUrl, link); // link has a relative path "./itemFile.json"
+    const item = await s3.getObjectJson(itemUrl) as StacItem;
+    items.push(item);
+  }
+
+  return { items, total };
+}
+
+/**
  * Reads the content of the specified catalogs and returns an array of catalog items
  * combined from all catalogs.
  *

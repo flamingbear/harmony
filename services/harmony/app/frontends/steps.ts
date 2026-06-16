@@ -22,36 +22,50 @@ import { keysToLowerCase } from '../util/object';
 import { defaultObjectStore } from '../util/object-store';
 import { getPagingLinks, parseIntegerParam } from '../util/pagination';
 import { parseMultiValueParameter } from '../util/parameter-parsing-helpers';
-import { readCatalogItems, StacItem } from '../util/stac';
+import { readCatalogItems, readCatalogItemsPage, StacItem } from '../util/stac';
 import { getRequestRoot } from '../util/url';
 
 const DEFAULT_WORKITEMS_PER_PAGE = 50;
 const MAX_WORKITEMS_PER_PAGE = 1000;
 
-// Default number of a work item's output catalogs resolved per page, navigated with the
-// per-work-item `workItem<id>Page` parameter and overridable via the `wiLimit` query
-// parameter. Bounds the S3 reads each page costs.
+// Default number of a work item's input items / output catalogs resolved per page,
+// navigated with the per-work-item `workItem<id>InputPage` / `workItem<id>Page`
+// parameters and overridable via the `wiLimit` query parameter. Bounds the S3 reads
+// each resolved page costs.
 const CATALOG_PAGE_SIZE = 10;
-// Upper bound on the number of items resolved from a single work item's input
-// catalog. A work item has one input catalog, but for an aggregating service that
-// catalog can list a huge number of items; this keeps the read bounded. Full
-// input pagination is a possible follow-up.
-const MAX_INPUT_CATALOG_ITEMS = 100;
+// Upper bound on `wiLimit`: the largest page of input items / output catalogs that
+// may be resolved in a single request. A work item's input catalog can list a huge
+// number of items (e.g. an aggregating service), so this caps the per-page read cost.
+const MAX_WI_PAGE_SIZE = 100;
 const VALID_STATUSES = Object.values(WorkItemStatus);
+
+// Which side of a single work item's files a resolve request is asking for.
+type ResolveKind = 'input' | 'output';
+const VALID_RESOLVE_KINDS: ResolveKind[] = ['input', 'output'];
 
 
 interface StepsQueryParams {
   steps?: number[];
   statuses?: WorkItemStatus[];
   workItems?: number[];
+  // When set, the request resolves a single work item's input or output files
+  // inline (rather than returning the link-only overview).
+  resolveFiles?: ResolveKind;
 }
 
 interface StepWorkItem {
   id: number;
   status: WorkItemStatus;
   retryCount: number;
-  inputFiles: string[] | null;
-  outputFiles: string[] | null;
+  // Overview mode: links back to the steps endpoint that resolve this work item's
+  // input / output files (null when the work item has no input / no outputs yet).
+  inputFilesUrl?: string | null;
+  outputFilesUrl?: string | null;
+  // Resolve mode: the requested page of files for the requested kind, plus paging
+  // when there is more than one page. Only the requested kind is populated.
+  inputFiles?: string[] | null;
+  inputFilesPaging?: StepPaging;
+  outputFiles?: string[] | null;
   outputFilesPaging?: StepPaging;
 }
 
@@ -114,6 +128,14 @@ function parseQuery(query: Record<string, unknown>): StepsQueryParams {
     });
   }
 
+  if (query.resolvefiles !== undefined) {
+    const kind = query.resolvefiles as ResolveKind;
+    if (!VALID_RESOLVE_KINDS.includes(kind)) {
+      throw new RequestValidationError(`resolveFiles must be one of: ${VALID_RESOLVE_KINDS.join(', ')}`);
+    }
+    out.resolveFiles = kind;
+  }
+
   return out;
 }
 
@@ -135,20 +157,19 @@ function getAllAssetHrefs(items: StacItem[]): string[] {
 }
 
 /**
- * Read a STAC catalog and return every asset href it references.
+ * Read a STAC catalog and return every asset href it references. Used to resolve
+ * a single output catalog (one page of a work item's outputs); input catalogs,
+ * which can list a huge number of items, are read a page at a time via
+ * `resolveInputFiles` instead.
  *
  * @param catalogUrl - the location of the STAC catalog to read
- * @param maxItems - if provided, read at most this many items from the catalog
- *   (bounds the number of S3 reads)
  * @returns the asset hrefs from the catalog, or an empty array if the catalog
  *   cannot be read (e.g. the service failed before producing it, or the
  *   catalog has no assets)
  */
-async function resolveDataHrefs(catalogUrl: string, maxItems?: number, logger?: Logger): Promise<string[]> {
+async function resolveDataHrefs(catalogUrl: string, logger?: Logger): Promise<string[]> {
   try {
-    // TODO [MHS, 06/16/2026]  this will need to be a paged read somehow..
-    // the catalogURL can point
-    const items = await readCatalogItems(catalogUrl, maxItems, logger);
+    const items = await readCatalogItems(catalogUrl, undefined, logger);
     return getAllAssetHrefs(items);
   } catch {
     return [];
@@ -183,20 +204,48 @@ export function safePublicLink(href: string, frontendRoot: string, destinationBu
   }
 }
 
-// A work item's output catalogs for the requested page, plus the pagination
-// describing where that page sits in the full (catalog-level) result set.
-interface WiOutputPage {
-  // The output catalog URLs for the current page only.
-  urls: string[];
-  // Catalog-level pagination over the work item's full output catalog list.
-  pagination: ILengthAwarePagination;
+// A single work item's resolved page of files plus its paging (paging is omitted
+// when there is only one page).
+interface WiResolvedFiles {
+  files: string[];
+  paging?: StepPaging;
 }
 
-interface ResolvedCatalogs {
-  // Map of local catalog.json location -> Array of public links to file.
-  catalogHrefs: Map<string, string[]>;
-  // Map of work item id to its current page of output catalogs + pagination.
-  wiOutputPages: Map<number, WiOutputPage>;
+// Map of work item id -> its resolved page of files (only populated in resolve mode).
+type ResolvedFiles = Map<number, WiResolvedFiles>;
+
+/**
+ * Build the link, back to this same steps endpoint, that resolves a single work
+ * item's input or output files inline.
+ *
+ * @param req - the Express request, used for the host and current path
+ * @param wiId - the work item id to scope the link to
+ * @param kind - whether the link resolves input or output files
+ * @returns the absolute URL that resolves that work item's files
+ */
+function workItemFilesUrl(req: HarmonyRequest, wiId: number, kind: ResolveKind): string {
+  const path = req.originalUrl.split('?')[0];
+  return `${getRequestRoot(req)}${path}?workitem=${wiId}&resolvefiles=${kind}`;
+}
+
+/**
+ * Build the paging block for a resolved page of a work item's files, or undefined
+ * when the files fit on a single page.
+ *
+ * @param req - the Express request, used to build the paging links
+ * @param pagination - the catalog-level pagination for the work item's files
+ * @param pageParamName - the per-work-item page query parameter the links should set
+ * @returns the paging block, or undefined when there is only one page
+ */
+function buildFilesPaging(
+  req: HarmonyRequest, pagination: ILengthAwarePagination, pageParamName: string,
+): StepPaging | undefined {
+  const { currentPage, lastPage, total } = pagination;
+  if (lastPage <= 1) return undefined;
+  return {
+    currentPage, lastPage, total,
+    links: getPagingLinks(req, pagination, true, pageParamName, 'wilimit'),
+  };
 }
 
 /**
@@ -226,7 +275,7 @@ function catalogIndex(filename: string): number {
  * @param outputDir - the WI's outputs directory URL
  * @returns the ordered output catalog URLs
  */
-async function readOutputCatalogs(outputDir: string): Promise<string[]> {
+async function getAllOutputCatalogFilenames(outputDir: string): Promise<string[]> {
   const store = defaultObjectStore();
   const batchCatalogsUrl = `${outputDir}batch-catalogs.json`;
 
@@ -271,115 +320,141 @@ function catalogPagination(total: number, requestedPage: number, perPage: number
 }
 
 /**
- * For every completed work item, determine the requested page of its output
- * catalog file URLs, then resolve the catalogs needed for the response to
- * public-facing data hrefs. Only the current page of each work item's output
- * catalogs is resolved (full), and each work item's single input catalog is
- * resolved with a bounded number of items, so the S3 reads stay bounded
- * regardless of the size of the fan-out.
+ * Resolve one page of a work item's input files. The work item's single input
+ * catalog can reference a huge number of items (e.g. an aggregating service), so
+ * the catalog is enumerated once and only the requested page of items is read,
+ * keeping the S3 reads bounded by `wiLimit`.
  *
- * @param req - the Express request, used to read each work item's page parameter
- * @param workItems - the page of work items whose catalogs should be resolved
+ * @param req - the Express request, used to read the input page / wiLimit params
+ * @param wi - the work item whose input catalog should be resolved
  * @param frontendRoot - the root URL to use when producing Harmony permalinks
  * @param destinationBucket - the job's destinationUrl bucket name, or undefined
- * @returns the per-catalog hrefs map and per-WI output page (see ResolvedCatalogs)
+ * @returns the page of public file links plus paging (paging omitted for one page)
  */
-async function resolveAllCatalogs(
-  req: HarmonyRequest,
-  workItems: WorkItem[],
-  frontendRoot: string,
-  destinationBucket: string = undefined,
-): Promise<ResolvedCatalogs> {
-  const startTime = new Date().getTime();
-  const completed_workitems = workItems.filter((wi) => COMPLETED_WORK_ITEM_STATUSES.includes(wi.status));
-
-  // Determine each completed WI's current page of *output* catalog file URLs.
-  const wiPageSize = parseIntegerParam(req, 'wilimit', CATALOG_PAGE_SIZE, 1, MAX_INPUT_CATALOG_ITEMS, true, true);
-  const wiOutputPages = new Map<number, WiOutputPage>();
-  await Promise.all(completed_workitems.map(async (wi) => {
-    const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
-    const allUrls = await readOutputCatalogs(outputDir);
-    const requestedPage = parseIntegerParam(req, `workitem${wi.id}page`, 1, 1);
-    const pagination = catalogPagination(allUrls.length, requestedPage, wiPageSize);
-    const start = (pagination.currentPage - 1) * wiPageSize;
-    const urls = allUrls.slice(start, start + wiPageSize);
-    wiOutputPages.set(wi.id, { urls, pagination });
-  }));
-
-  const catalogHrefs = new Map<string, string[]>();
-  const resolve = async (url: string, maxItems?: number): Promise<void> => {
-    if (catalogHrefs.has(url)) return;
-    const rawHrefs = await resolveDataHrefs(url, maxItems, req.context.logger);
-    catalogHrefs.set(url, rawHrefs.map((h) => safePublicLink(h, frontendRoot, destinationBucket)));
-  };
-
-  // Resolve the current page of output catalogs (full), then each WI's single
-  // input catalog (bounded). Outputs first so a URL that is both keeps the
-  // full output resolution.
-  const outputUrls = new Set<string>();
-  for (const wi of completed_workitems) {
-    for (const url of wiOutputPages.get(wi.id)?.urls ?? []) outputUrls.add(url);
+async function resolveInputFiles(
+  req: HarmonyRequest, wi: WorkItem, frontendRoot: string, destinationBucket: string | undefined,
+): Promise<WiResolvedFiles> {
+  if (!wi.stacCatalogLocation) return { files: [] };
+  const perPage = parseIntegerParam(req, 'wilimit', CATALOG_PAGE_SIZE, 1, MAX_WI_PAGE_SIZE, true, true);
+  const requestedPage = parseIntegerParam(req, `workitem${wi.id}inputpage`, 1, 1);
+  try {
+    const first = await readCatalogItemsPage(
+      wi.stacCatalogLocation, (requestedPage - 1) * perPage, perPage, req.context.logger);
+    const pagination = catalogPagination(first.total, requestedPage, perPage);
+    // Re-read the clamped page when the requested page was beyond the last.
+    let { items } = first;
+    if (pagination.currentPage !== requestedPage) {
+      ({ items } = await readCatalogItemsPage(
+        wi.stacCatalogLocation, (pagination.currentPage - 1) * perPage, perPage, req.context.logger));
+    }
+    const files = getAllAssetHrefs(items).map((h) => safePublicLink(h, frontendRoot, destinationBucket));
+    return { files, paging: buildFilesPaging(req, pagination, `workitem${wi.id}inputpage`) };
+  } catch {
+    return { files: [] };
   }
-  await Promise.all(Array.from(outputUrls).map((url) => resolve(url)));
-
-  const inputUrls = new Set<string>();
-  for (const wi of completed_workitems) {
-    if (wi.stacCatalogLocation) inputUrls.add(wi.stacCatalogLocation);
-  }
-  await Promise.all(Array.from(inputUrls).map((url) => resolve(url, MAX_INPUT_CATALOG_ITEMS)));
-
-  const durationMs = new Date().getTime() - startTime;
-  req.context.logger.info('Finished steps:resolveAllCatalogs', { durationMs });
-  return { catalogHrefs, wiOutputPages };
 }
 
 /**
- * Build the work item portion of the response. inputFiles / outputFiles are
- * populated from the precomputed `resolved` maps; a WI absent from
- * `wiOutputPages` displays `outputFiles: null`. WIs that never have a STAC
- * input (e.g.  query-cmr step 1) always report `inputFiles: null`. When a work
- * item has more than one page of output catalogs, an `outputFilesPaging` block
- * with navigation links (via the `workItem<id>Page` parameter) is included.
+ * Resolve one page of a work item's output files. A work item's outputs are a list
+ * of catalog files; only the requested page of those catalogs is read (each fully)
+ * so the S3 reads stay bounded by `wiLimit`.
  *
- * @param req - the Express request, used to build per-work-item paging links
+ * @param req - the Express request, used to read the output page / wiLimit params
+ * @param wi - the work item whose output catalogs should be resolved
+ * @param frontendRoot - the root URL to use when producing Harmony permalinks
+ * @param destinationBucket - the job's destinationUrl bucket name, or undefined
+ * @returns the page of public file links plus paging (paging omitted for one page)
+ */
+async function resolveOutputFiles(
+  req: HarmonyRequest, wi: WorkItem, frontendRoot: string, destinationBucket: string | undefined,
+): Promise<WiResolvedFiles> {
+  if (!COMPLETED_WORK_ITEM_STATUSES.includes(wi.status)) return { files: [] };
+  const perPage = parseIntegerParam(req, 'wilimit', CATALOG_PAGE_SIZE, 1, MAX_WI_PAGE_SIZE, true, true);
+  const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
+  const allUrls = await getAllOutputCatalogFilenames(outputDir);
+  const requestedPage = parseIntegerParam(req, `workitem${wi.id}page`, 1, 1);
+  const pagination = catalogPagination(allUrls.length, requestedPage, perPage);
+  const start = (pagination.currentPage - 1) * perPage;
+  const pageUrls = allUrls.slice(start, start + perPage);
+  const hrefArrays = await Promise.all(pageUrls.map((url) => resolveDataHrefs(url, req.context.logger)));
+  const files = hrefArrays.flat().map((h) => safePublicLink(h, frontendRoot, destinationBucket));
+  return { files, paging: buildFilesPaging(req, pagination, `workitem${wi.id}page`) };
+}
+
+/**
+ * Resolve the requested kind (input or output) of files for the given work items
+ * inline. Only invoked in resolve mode, which is scoped to a single work item, so
+ * the S3 reads are bounded to that one work item's requested page.
+ *
+ * @param req - the Express request
+ * @param workItems - the work items to resolve (a single item in resolve mode)
+ * @param kind - whether to resolve input or output files
+ * @param frontendRoot - the root URL to use when producing Harmony permalinks
+ * @param destinationBucket - the job's destinationUrl bucket name, or undefined
+ * @returns map of work item id to its resolved page of files
+ */
+async function resolveSelectedWorkItemFiles(
+  req: HarmonyRequest,
+  workItems: WorkItem[],
+  kind: ResolveKind,
+  frontendRoot: string,
+  destinationBucket: string | undefined,
+): Promise<ResolvedFiles> {
+  const startTime = new Date().getTime();
+  const resolved: ResolvedFiles = new Map();
+  await Promise.all(workItems.map(async (wi) => {
+    const result = kind === 'input'
+      ? await resolveInputFiles(req, wi, frontendRoot, destinationBucket)
+      : await resolveOutputFiles(req, wi, frontendRoot, destinationBucket);
+    resolved.set(wi.id, result);
+  }));
+  const durationMs = new Date().getTime() - startTime;
+  req.context.logger.info('Finished steps:resolveSelectedWorkItemFiles', { durationMs });
+  return resolved;
+}
+
+/**
+ * Build the work item portion of the response.
+ *
+ * In overview mode (no `resolveFiles`) the work item carries `inputFilesUrl` /
+ * `outputFilesUrl` links back to this endpoint that resolve its files on demand,
+ * doing no S3 reads here: `inputFilesUrl` is null when the work item has no STAC
+ * input (e.g. query-cmr step 1) and `outputFilesUrl` is null until the work item
+ * completes.
+ *
+ * In resolve mode the requested kind's files are populated inline from the
+ * precomputed `resolved` map, with an `inputFilesPaging` / `outputFilesPaging`
+ * block (navigated via the `workItem<id>InputPage` / `workItem<id>Page`
+ * parameter) when there is more than one page.
+ *
+ * @param req - the Express request, used to build links
  * @param wi - the work item to serialize
- * @param resolved - the catalog hrefs map + per-WI output page
+ * @param q - the parsed steps query (determines overview vs resolve mode)
+ * @param resolved - the per-WI resolved files map (resolve mode only)
  * @returns the work item shaped for the steps response
  */
 function buildWorkItem(
   req: HarmonyRequest,
   wi: WorkItem,
-  resolved: ResolvedCatalogs,
+  q: StepsQueryParams,
+  resolved?: ResolvedFiles,
 ): StepWorkItem {
-  const { catalogHrefs, wiOutputPages } = resolved;
-  const outputPage = wiOutputPages.get(wi.id);
-  let outputFiles: string[] | null;
-  let outputFilesPaging: StepPaging | undefined = undefined;
-  if (outputPage === undefined) {
-    outputFiles = null;
-  } else {
-    outputFiles = outputPage.urls.flatMap((url) => catalogHrefs.get(url) ?? []);
-    const { currentPage, lastPage, total } = outputPage.pagination;
-    if (lastPage > 1) {
-      outputFilesPaging = {
-        currentPage,
-        lastPage,
-        total,
-        links: getPagingLinks(req, outputPage.pagination, true, `workitem${wi.id}page`, 'wilimit'),
-      };
-    }
+  const base = { id: wi.id, status: wi.status, retryCount: wi.retryCount };
+
+  if (q.resolveFiles === undefined) {
+    return {
+      ...base,
+      inputFilesUrl: wi.stacCatalogLocation ? workItemFilesUrl(req, wi.id, 'input') : null,
+      outputFilesUrl: COMPLETED_WORK_ITEM_STATUSES.includes(wi.status)
+        ? workItemFilesUrl(req, wi.id, 'output') : null,
+    };
   }
 
-  return {
-    id: wi.id,
-    status: wi.status,
-    retryCount: wi.retryCount,
-    inputFiles: wi.stacCatalogLocation
-      ? (catalogHrefs.get(wi.stacCatalogLocation) ?? null)
-      : null,
-    outputFiles,
-    ...(outputFilesPaging !== undefined && { outputFilesPaging }),
-  };
+  const { files, paging } = resolved?.get(wi.id) ?? { files: [] };
+  if (q.resolveFiles === 'input') {
+    return { ...base, inputFiles: files, ...(paging !== undefined && { inputFilesPaging: paging }) };
+  }
+  return { ...base, outputFiles: files, ...(paging !== undefined && { outputFilesPaging: paging }) };
 }
 
 
@@ -399,17 +474,17 @@ interface StepWorkItems {
  *
  * @param req - the Express request, used to build per-step paging links
  * @param stepResults - each workflow step with its page of work items and pagination
- * @param resolved - resolved-catalog data from resolveAllCatalogs
  * @param statusCounts - per-step, per-status work item counts for the whole job
  * @param q - the parsed steps query, used to honor the status/workItem filters
+ * @param resolved - per-WI resolved files map (resolve mode only)
  * @returns the steps with their work items, status summary, and any paging links
  */
 function buildSteps(
   req: HarmonyRequest,
   stepResults: StepWorkItems[],
-  resolved: ResolvedCatalogs,
   statusCounts: Map<number, Partial<Record<WorkItemStatus, number>>>,
   q: StepsQueryParams,
+  resolved?: ResolvedFiles,
 ): JobStep[] {
   const result: JobStep[] = [];
   const filtering = q.statuses !== undefined || q.workItems !== undefined;
@@ -422,7 +497,7 @@ function buildSteps(
       stepIndex: step.stepIndex,
       workItemCount: step.workItemCount,
       statuses: statusCounts.get(step.stepIndex) ?? {},
-      workItems: workItems.map((wi) => buildWorkItem(req, wi, resolved)),
+      workItems: workItems.map((wi) => buildWorkItem(req, wi, q, resolved)),
     };
     const { currentPage, lastPage, total } = pagination;
     if (lastPage > 1) {
@@ -492,8 +567,17 @@ export async function getJobSteps(
 
     const frontendRoot = getRequestRoot(req);
     const allWorkItems = stepResults.flatMap((r) => r.workItems);
-    const resolvedCatalogs = await resolveAllCatalogs(req, allWorkItems, frontendRoot, destinationBucket);
-    const jobSteps = buildSteps(req, stepResults, resolvedCatalogs, statusCounts, q);
+
+    // Resolve mode resolves a single work item's files inline; the default
+    // overview does no S3 reads and returns links to resolve them on demand.
+    let resolved: ResolvedFiles | undefined;
+    if (q.resolveFiles !== undefined) {
+      if (q.workItems === undefined || q.workItems.length !== 1) {
+        throw new RequestValidationError('resolveFiles requires exactly one workItem');
+      }
+      resolved = await resolveSelectedWorkItemFiles(req, allWorkItems, q.resolveFiles, frontendRoot, destinationBucket);
+    }
+    const jobSteps = buildSteps(req, stepResults, statusCounts, q, resolved);
 
     const responseBody = {
       jobID: job.jobID,
