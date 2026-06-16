@@ -286,6 +286,7 @@ async function resolveAllCatalogs(
   frontendRoot: string,
   destinationBucket: string = undefined,
 ): Promise<ResolvedCatalogs> {
+  const startTime = new Date().getTime();
   const completed_workitems = workItems.filter((wi) => COMPLETED_WORK_ITEM_STATUSES.includes(wi.status));
 
   // Determine each completed WI's current page of *output* catalog file URLs.
@@ -322,6 +323,8 @@ async function resolveAllCatalogs(
   }
   await Promise.all(Array.from(inputUrls).map((url) => resolve(url, MAX_INPUT_CATALOG_ITEMS)));
 
+  const durationMs = new Date().getTime() - startTime;
+  req.context.logger.info(`Finished steps:resolveAllCatalogs`, {durationMs});
   return { catalogHrefs, wiOutputPages };
 }
 
@@ -445,6 +448,7 @@ function buildSteps(
 export async function getJobSteps(
   req: HarmonyRequest, res: Response, next: NextFunction,
 ): Promise<void> {
+  const startTime = new Date().getTime();
   const { jobID } = req.params;
   try {
     req.query = keysToLowerCase(req.query);
@@ -497,7 +501,8 @@ export async function getJobSteps(
       request: job.request,
       steps: jobSteps,
     };
-
+    const durationMs = new Date().getTime() - startTime;
+    req.context.logger.info(`Finished /steps for ${jobID}`, {durationMs});
     res.json(responseBody);
   } catch (e) {
     req.context.logger.error(e);
