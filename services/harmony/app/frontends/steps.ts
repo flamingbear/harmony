@@ -1,5 +1,6 @@
 import { NextFunction, Response } from 'express';
 import { ILengthAwarePagination } from 'knex-paginate';
+import { Logger } from 'winston';
 
 import { sanitizeImage } from '@harmony/util/string';
 
@@ -29,7 +30,7 @@ const MAX_WORKITEMS_PER_PAGE = 1000;
 
 // Number of a work item's output catalogs resolved per page, navigated with the
 // per-work-item `workItem<id>Page` parameter. Bounds the S3 reads each page costs.
-const CATALOG_PAGE_SIZE = 10;
+const CATALOG_PAGE_SIZE = 2;
 // Upper bound on the number of items resolved from a single work item's input
 // catalog. A work item has one input catalog, but for an aggregating service that
 // catalog can list a huge number of items; this keeps the read bounded. Full
@@ -142,9 +143,11 @@ function getAllAssetHrefs(items: StacItem[]): string[] {
  *   cannot be read (e.g. the service failed before producing it, or the
  *   catalog has no assets)
  */
-async function resolveDataHrefs(catalogUrl: string, maxItems?: number): Promise<string[]> {
+async function resolveDataHrefs(catalogUrl: string, maxItems?: number, logger?: Logger): Promise<string[]> {
   try {
-    const items = await readCatalogItems(catalogUrl, maxItems);
+    // TODO [MHS, 06/16/2026]  this will need to be a paged read somehow..
+    // the catalogURL can point
+    const items = await readCatalogItems(catalogUrl, maxItems, logger);
     return getAllAssetHrefs(items);
   } catch {
     return [];
@@ -254,8 +257,7 @@ async function readOutputCatalogs(outputDir: string): Promise<string[]> {
  * @param requestedPage - the page requested via the work item's page parameter
  * @returns the pagination describing the (clamped) current page
  */
-function catalogPagination(total: number, requestedPage: number): ILengthAwarePagination {
-  const perPage = CATALOG_PAGE_SIZE;
+function catalogPagination(total: number, requestedPage: number, perPage: number = CATALOG_PAGE_SIZE): ILengthAwarePagination {
   const lastPage = Math.max(1, Math.ceil(total / perPage));
   const currentPage = Math.min(requestedPage, lastPage);
   const from = total === 0 ? 0 : (currentPage - 1) * perPage + 1;
@@ -291,21 +293,22 @@ async function resolveAllCatalogs(
   const completed_workitems = workItems.filter((wi) => COMPLETED_WORK_ITEM_STATUSES.includes(wi.status));
 
   // Determine each completed WI's current page of *output* catalog file URLs.
+  const wiPageSize = parseIntegerParam(req, 'wilimit', CATALOG_PAGE_SIZE, 1, MAX_INPUT_CATALOG_ITEMS, true, true);
   const wiOutputPages = new Map<number, WiOutputPage>();
   await Promise.all(completed_workitems.map(async (wi) => {
     const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
     const allUrls = await readOutputCatalogs(outputDir);
     const requestedPage = parseIntegerParam(req, `workitem${wi.id}page`, 1, 1);
-    const pagination = catalogPagination(allUrls.length, requestedPage);
-    const start = (pagination.currentPage - 1) * CATALOG_PAGE_SIZE;
-    const urls = allUrls.slice(start, start + CATALOG_PAGE_SIZE);
+    const pagination = catalogPagination(allUrls.length, requestedPage, wiPageSize);
+    const start = (pagination.currentPage - 1) * wiPageSize;
+    const urls = allUrls.slice(start, start + wiPageSize);
     wiOutputPages.set(wi.id, { urls, pagination });
   }));
 
   const catalogHrefs = new Map<string, string[]>();
   const resolve = async (url: string, maxItems?: number): Promise<void> => {
     if (catalogHrefs.has(url)) return;
-    const rawHrefs = await resolveDataHrefs(url, maxItems);
+    const rawHrefs = await resolveDataHrefs(url, maxItems, req.context.logger);
     catalogHrefs.set(url, rawHrefs.map((h) => safePublicLink(h, frontendRoot, destinationBucket)));
   };
 
@@ -361,7 +364,7 @@ function buildWorkItem(
         currentPage,
         lastPage,
         total,
-        links: getPagingLinks(req, outputPage.pagination, true, `workitem${wi.id}page`),
+        links: getPagingLinks(req, outputPage.pagination, true, `workitem${wi.id}page`, 'wilimit'),
       };
     }
   }
