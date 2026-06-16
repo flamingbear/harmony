@@ -86,7 +86,7 @@ const destBucketJob = buildJob({
   destination_url: 's3://user-bucket/out',
 });
 
-// Job whose single step has more work items than DEFAULT_PER_PAGE (50), to
+// Job whose single step has more work items than DEFAULT_WORKITEMS_PER_PAGE (50), to
 // exercise per-step paging and the paging links block.
 const pagedJob = buildJob({
   username: 'joe',
@@ -95,8 +95,8 @@ const pagedJob = buildJob({
   request: 'https://harmony.example/paged',
 });
 
-// Job whose single step holds one more work item than MAX_STEP_PAGE_SIZE, so a
-// limit above the max defaults to MAX_STEP_PAGE_SIZE (1000)
+// Job whose single step holds one more work item than MAX_WORKITEMS_PER_PAGE, so a
+// limit above the max defaults to MAX_WORKITEMS_PER_PAGE (1000)
 const BIG_STEP_WORKITEMS = 1001;
 const bigStepJob = buildJob({
   username: 'joe',
@@ -105,7 +105,7 @@ const bigStepJob = buildJob({
   request: 'https://harmony.example/big-step',
 });
 
-// Job with two steps each holding more than DEFAULT_PER_PAGE (50) work items, to
+// Job with two steps each holding more than DEFAULT_WORKITEMS_PER_PAGE (50) work items, to
 // exercise that each step pages independently via its own step<idx>Page param.
 const twoPagedJob = buildJob({
   username: 'joe',
@@ -300,7 +300,7 @@ describe('GET /jobs/:jobID/steps', function () {
     }), stacLoc('item0.json'), null, 'application/json');
 
     // A job whose single step holds 51 READY work items — one over
-    // DEFAULT_PER_PAGE (50). READY items are skipped by catalog resolution, so
+    // DEFAULT_WORKITEMS_PER_PAGE (50). READY items are skipped by catalog resolution, so
     // this stays cheap while still exercising the per-step bound + paging block.
     await pagedJob.save(this.trx);
     const pagedStep = buildWorkflowStep({
@@ -319,8 +319,8 @@ describe('GET /jobs/:jobID/steps', function () {
     }));
     await WorkItem.insertBatch(this.trx, pagedWorkItems);
 
-    // A job whose single step holds one more than MAX_STEP_PAGE_SIZE (1000) READY work
-    // items, used to show a limit above the MAX_STEP_PAGE_SIZE defaults to MAX_STEP_PAGE_SIZE.
+    // A job whose single step holds one more than MAX_WORKITEMS_PER_PAGE (1000) READY work
+    // items, used to show a limit above the MAX_WORKITEMS_PER_PAGE defaults to MAX_WORKITEMS_PER_PAGE.
     await bigStepJob.save(this.trx);
     const bigStep = buildWorkflowStep({
       jobID: bigStepJob.jobID,
@@ -717,7 +717,7 @@ describe('GET /jobs/:jobID/steps', function () {
   describe('For a step with more work items than the per-step limit', function () {
     hookJobSteps({ jobID: pagedJob.jobID, username: 'joe' });
 
-    it('caps the work items at DEFAULT_PER_PAGE and adds a paging block with links', function () {
+    it('caps the work items at DEFAULT_WORKITEMS_PER_PAGE and adds a paging block with links', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const step = body.steps[0];
@@ -764,7 +764,7 @@ describe('GET /jobs/:jobID/steps', function () {
   describe('When ?limit= exceeds the maximum page size', function () {
     hookJobSteps({ jobID: bigStepJob.jobID, username: 'joe', query: { limit: 99999 } });
 
-    it('defaults limit to MAX_STEP_PAGE_SIZE and pages', function () {
+    it('defaults limit to MAX_WORKITEMS_PER_PAGE and pages', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const step = body.steps[0];
