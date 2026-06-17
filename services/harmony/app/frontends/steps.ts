@@ -427,16 +427,12 @@ async function resolveWorkItemFiles(
 /**
  * Build the workItem portion of the response.
  *
- * In overview mode (no `resolveFiles`) the workItem carries `inputFilesUrl` /
- * `outputFilesUrl` links back to this endpoint that resolve its files on demand,
- * doing no S3 reads here: `inputFilesUrl` is null when the workItem has no STAC
- * input (e.g. query-cmr step 1) and `outputFilesUrl` is null until the workItem
- * completes.
+ * In overview mode a workItem carries `inputFilesUrl` / `outputFilesUrl` links
+ * doing no S3 reads here.
  *
- * In resolve mode the requested kind's files are populated inline from the
+ * In resolve mode either input or output files are populated inline from the
  * precomputed `resolved` map, with an `inputFilesPaging` / `outputFilesPaging`
- * block (navigated via the `workItem<id>InputPage` / `workItem<id>OutputPage`
- * parameter) when there is more than one page.
+ * block when necessary.
  *
  * @param req - the Express request, used to build links
  * @param wi - the workItem to serialize
