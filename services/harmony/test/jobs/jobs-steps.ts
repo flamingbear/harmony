@@ -40,8 +40,8 @@ let inputPagedWiId: number;
 let destWiId: number;
 
 // Number of output catalogs staged for the paged-output work item, chosen to
-// span more than one page given the 10-catalog page size (ceil(25/10) = 3).
-const PAGED_OUTPUT_CATALOGS = 25;
+// span more than one page given the 50-catalog page size (ceil(60/50) = 2).
+const PAGED_OUTPUT_CATALOGS = 60;
 
 const joeJob = buildJob({
   username: 'joe',
@@ -75,8 +75,8 @@ const inputPagedJob = buildJob({
   request: 'https://harmony.example/input-paged',
 });
 // Number of items the input catalog references, chosen to span more than one page
-// given the 10-item page size (ceil(25/10) = 3).
-const INPUT_CATALOG_ITEMS = 25;
+// given the 50-item page size (ceil(60/50) = 2).
+const INPUT_CATALOG_ITEMS = 60;
 
 // Job written to a user-supplied destinationUrl bucket: its output catalog's
 // data asset is an s3:// href that createPublicPermalink can't sign (not under
@@ -632,14 +632,14 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
-      // 25 catalogs over a 10-catalog page: page 1 resolves exactly 10 files
+      // 60 catalogs over a 50-catalog page: page 1 resolves exactly 50 files
       // (one data asset per catalog), proving the rest were not read.
-      expect(wi.outputFiles).to.have.lengthOf(10);
+      expect(wi.outputFiles).to.have.lengthOf(50);
       expect(wi.outputFiles[0]).to.equal('https://example.com/granule0.nc4');
-      expect(wi.outputFiles[9]).to.equal('https://example.com/granule9.nc4');
+      expect(wi.outputFiles[49]).to.equal('https://example.com/granule49.nc4');
       expect(wi.outputFilesPaging.currentPage).to.equal(1);
-      expect(wi.outputFilesPaging.lastPage).to.equal(3); // ceil(25 / 10)
-      expect(wi.outputFilesPaging.total).to.equal(25);
+      expect(wi.outputFilesPaging.lastPage).to.equal(2); // ceil(60 / 50)
+      expect(wi.outputFilesPaging.total).to.equal(60);
       const next = wi.outputFilesPaging.links.find((l) => l.rel === 'next');
       expect(next.href).to.include(`workitem${pagedOutputWiId}page=2`);
       expect(wi.outputFilesPaging.links.find((l) => l.rel === 'prev')).to.be.undefined;
@@ -658,13 +658,13 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
-      // 25 catalogs over a 5-catalog page: page 1 resolves exactly 5 files.
+      // 60 catalogs over a 5-catalog page: page 1 resolves exactly 5 files.
       expect(wi.outputFiles).to.have.lengthOf(5);
       expect(wi.outputFiles[0]).to.equal('https://example.com/granule0.nc4');
       expect(wi.outputFiles[4]).to.equal('https://example.com/granule4.nc4');
       expect(wi.outputFilesPaging.currentPage).to.equal(1);
-      expect(wi.outputFilesPaging.lastPage).to.equal(5); // ceil(25 / 5)
-      expect(wi.outputFilesPaging.total).to.equal(25);
+      expect(wi.outputFilesPaging.lastPage).to.equal(12); // ceil(60 / 5)
+      expect(wi.outputFilesPaging.total).to.equal(60);
     });
 
   });
@@ -673,7 +673,7 @@ describe('GET /jobs/:jobID/steps', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
         jobID: pagedOutputJob.jobID,
-        query: { workItem: pagedOutputWiId, resolveFiles: 'output', [`workItem${pagedOutputWiId}Page`]: 3 },
+        query: { workItem: pagedOutputWiId, resolveFiles: 'output', [`workItem${pagedOutputWiId}Page`]: 2 },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -682,11 +682,11 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
-      expect(wi.outputFiles).to.have.lengthOf(5); // catalogs 20..24
-      expect(wi.outputFiles[0]).to.equal('https://example.com/granule20.nc4');
-      expect(wi.outputFilesPaging.currentPage).to.equal(3);
+      expect(wi.outputFiles).to.have.lengthOf(10); // catalogs 50..59
+      expect(wi.outputFiles[0]).to.equal('https://example.com/granule50.nc4');
+      expect(wi.outputFilesPaging.currentPage).to.equal(2);
       expect(wi.outputFilesPaging.links.find((l) => l.rel === 'prev').href)
-        .to.include(`workitem${pagedOutputWiId}page=2`);
+        .to.include(`workitem${pagedOutputWiId}page=1`);
       expect(wi.outputFilesPaging.links.find((l) => l.rel === 'next')).to.be.undefined;
     });
   });
@@ -704,9 +704,9 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
-      expect(wi.outputFiles).to.have.lengthOf(5);
-      expect(wi.outputFilesPaging.currentPage).to.equal(3);
-      expect(wi.outputFilesPaging.lastPage).to.equal(3);
+      expect(wi.outputFiles).to.have.lengthOf(10);
+      expect(wi.outputFilesPaging.currentPage).to.equal(2);
+      expect(wi.outputFilesPaging.lastPage).to.equal(2);
     });
   });
 
@@ -722,14 +722,14 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
-      // 25 items over a 10-item page: page 1 reads exactly 10 items, proving the
+      // 60 items over a 50-item page: page 1 reads exactly 50 items, proving the
       // rest were not read.
-      expect(wi.inputFiles).to.have.lengthOf(10);
+      expect(wi.inputFiles).to.have.lengthOf(50);
       expect(wi.inputFiles[0]).to.equal('https://example.com/input0.nc4');
-      expect(wi.inputFiles[9]).to.equal('https://example.com/input9.nc4');
+      expect(wi.inputFiles[49]).to.equal('https://example.com/input49.nc4');
       expect(wi.inputFilesPaging.currentPage).to.equal(1);
-      expect(wi.inputFilesPaging.lastPage).to.equal(3); // ceil(25 / 10)
-      expect(wi.inputFilesPaging.total).to.equal(25);
+      expect(wi.inputFilesPaging.lastPage).to.equal(2); // ceil(60 / 50)
+      expect(wi.inputFilesPaging.total).to.equal(60);
       const next = wi.inputFilesPaging.links.find((l) => l.rel === 'next');
       expect(next.href).to.include(`workitem${inputPagedWiId}inputpage=2`);
       expect(wi.inputFilesPaging.links.find((l) => l.rel === 'prev')).to.be.undefined;
@@ -740,7 +740,7 @@ describe('GET /jobs/:jobID/steps', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
         jobID: inputPagedJob.jobID,
-        query: { workItem: inputPagedWiId, resolveFiles: 'input', [`workItem${inputPagedWiId}InputPage`]: 3 },
+        query: { workItem: inputPagedWiId, resolveFiles: 'input', [`workItem${inputPagedWiId}InputPage`]: 2 },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -749,11 +749,11 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
-      expect(wi.inputFiles).to.have.lengthOf(5); // items 20..24
-      expect(wi.inputFiles[0]).to.equal('https://example.com/input20.nc4');
-      expect(wi.inputFilesPaging.currentPage).to.equal(3);
+      expect(wi.inputFiles).to.have.lengthOf(10); // items 50..59
+      expect(wi.inputFiles[0]).to.equal('https://example.com/input50.nc4');
+      expect(wi.inputFilesPaging.currentPage).to.equal(2);
       expect(wi.inputFilesPaging.links.find((l) => l.rel === 'prev').href)
-        .to.include(`workitem${inputPagedWiId}inputpage=2`);
+        .to.include(`workitem${inputPagedWiId}inputpage=1`);
       expect(wi.inputFilesPaging.links.find((l) => l.rel === 'next')).to.be.undefined;
     });
   });
@@ -771,9 +771,9 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
-      expect(wi.inputFiles).to.have.lengthOf(5);
-      expect(wi.inputFilesPaging.currentPage).to.equal(3);
-      expect(wi.inputFilesPaging.lastPage).to.equal(3);
+      expect(wi.inputFiles).to.have.lengthOf(10);
+      expect(wi.inputFilesPaging.currentPage).to.equal(2);
+      expect(wi.inputFilesPaging.lastPage).to.equal(2);
     });
   });
 

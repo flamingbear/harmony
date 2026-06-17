@@ -32,7 +32,7 @@ const MAX_WORKITEMS_PER_PAGE = 1000;
 // navigated with the per-work-item `workItem<id>InputPage` / `workItem<id>Page`
 // parameters and overridable via the `wiLimit` query parameter. Bounds the S3 reads
 // each resolved page costs.
-const CATALOG_PAGE_SIZE = 10;
+const CATALOG_PAGE_SIZE = 50;
 // Upper bound on `wiLimit`: the largest page of input items / output catalogs that
 // may be resolved in a single request. A work item's input catalog can list a huge
 // number of items (e.g. an aggregating service), so this caps the per-page read cost.
@@ -157,10 +157,11 @@ function getAllAssetHrefs(items: StacItem[]): string[] {
 }
 
 /**
- * Read a STAC catalog and return every asset href it references. Used to resolve
- * a single output catalog (one page of a work item's outputs); input catalogs,
- * which can list a huge number of items, are read a page at a time via
- * `resolveInputFiles` instead.
+ * Read a single STAC output catalog in full (all of its items) and return every
+ * asset href it references. A work item's outputs are a list of such catalogs;
+ * `resolveOutputFiles` calls this once per catalog on the requested page. Input
+ * catalogs, which can list a huge number of items, are instead read a page of
+ * items at a time via `resolveInputFiles`.
  *
  * @param catalogUrl - the location of the STAC catalog to read
  * @returns the asset hrefs from the catalog, or an empty array if the catalog
@@ -169,7 +170,7 @@ function getAllAssetHrefs(items: StacItem[]): string[] {
  */
 async function resolveDataHrefs(catalogUrl: string, logger?: Logger): Promise<string[]> {
   try {
-    const items = await readCatalogItems(catalogUrl, undefined, logger);
+    const items = await readCatalogItems(catalogUrl, logger);
     return getAllAssetHrefs(items);
   } catch {
     return [];
@@ -371,11 +372,11 @@ async function resolveOutputFiles(
   if (!COMPLETED_WORK_ITEM_STATUSES.includes(wi.status)) return { files: [] };
   const perPage = parseIntegerParam(req, 'wilimit', CATALOG_PAGE_SIZE, 1, MAX_WI_PAGE_SIZE, true, true);
   const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
-  const allUrls = await getAllOutputCatalogFilenames(outputDir);
+  const allCatalogUrls = await getAllOutputCatalogFilenames(outputDir);
   const requestedPage = parseIntegerParam(req, `workitem${wi.id}page`, 1, 1);
-  const pagination = catalogPagination(allUrls.length, requestedPage, perPage);
+  const pagination = catalogPagination(allCatalogUrls.length, requestedPage, perPage);
   const start = (pagination.currentPage - 1) * perPage;
-  const pageUrls = allUrls.slice(start, start + perPage);
+  const pageUrls = allCatalogUrls.slice(start, start + perPage);
   const hrefArrays = await Promise.all(pageUrls.map((url) => resolveDataHrefs(url, req.context.logger)));
   const files = hrefArrays.flat().map((h) => safePublicLink(h, frontendRoot, destinationBucket));
   return { files, paging: buildFilesPaging(req, pagination, `workitem${wi.id}page`) };
