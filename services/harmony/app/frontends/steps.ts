@@ -1,6 +1,5 @@
 import { NextFunction, Response } from 'express';
 import { ILengthAwarePagination } from 'knex-paginate';
-import { Logger } from 'winston';
 
 import { sanitizeImage } from '@harmony/util/string';
 

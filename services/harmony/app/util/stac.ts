@@ -1,5 +1,3 @@
-import { Logger } from 'winston';
-
 import { objectStoreForProtocol } from './object-store';
 import { resolve } from './url';
 import JobLink from '../models/job-link';
@@ -113,7 +111,7 @@ export async function getCatalogItemUrls(catalogUrl: string): Promise<string[]> 
  * @returns the items at the given URLs
  */
 export async function readItemsAtUrls(
-  catalogUrl: string, itemUrls: string[]
+  catalogUrl: string, itemUrls: string[],
 ): Promise<StacItem[]> {
   const s3 = objectStoreForProtocol('s3');
 
@@ -130,7 +128,6 @@ export async function readItemsAtUrls(
 /**
  * Reads the content of the catalog and returns all of its catalog items.
  * @param catalogUrl - the catalog s3 url
- * @param logger - optional logger
  */
 export async function readCatalogItems(catalogUrl: string): Promise<StacItem[]> {
   const childLinks = await getCatalogItemUrls(catalogUrl);
