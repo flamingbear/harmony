@@ -27,28 +27,26 @@ import { getRequestRoot } from '../util/url';
 const DEFAULT_WORKITEMS_PER_PAGE = 50;
 const MAX_WORKITEMS_PER_PAGE = 1000;
 
-// Default number of a work item's input items / output catalogs resolved per page,
-// navigated with the per-work-item `workItem<id>InputPage` / `workItem<id>OutputPage`
-// parameters and overridable via the `wiLimit` query parameter. Bounds the S3 reads
-// each resolved page costs.
-const CATALOG_PAGE_SIZE = 50;
+// Default `wiLimit`: the number of a work item's input items / output catalogs
+// resolved per page. This confusingly will not always result in
+// DEFAULT_WI_LIMIT items in the output. For input catalogs we are reading
+// items inside a single catalog, a single item file with perhaps many
+// items. and for output catalogs, we're reading 1 batch catalog and all of
+// its files.
+const DEFAULT_WI_LIMIT = 50;
 // Upper bound on `wiLimit`: the largest page of input items / output catalogs that
-// may be resolved in a single request. A work item's input catalog can list a huge
-// number of items (e.g. an aggregating service), so this caps the per-page read cost.
-const MAX_WI_PAGE_SIZE = 100;
+// may be resolved in a single request.
+const MAX_WI_LIMIT = 100;
+
 const VALID_STATUSES = Object.values(WorkItemStatus);
 
-// Which side of a single work item's files a resolve request is asking for.
 type ResolveKind = 'input' | 'output';
 const VALID_RESOLVE_KINDS: ResolveKind[] = ['input', 'output'];
-
 
 interface StepsQueryParams {
   steps?: number[];
   statuses?: WorkItemStatus[];
   workItems?: number[];
-  // When set, the request resolves a single work item's input or output files
-  // inline (rather than returning the link-only overview).
   resolveFiles?: ResolveKind;
 }
 
@@ -57,7 +55,7 @@ interface StepWorkItem {
   status: WorkItemStatus;
   retryCount: number;
   // Overview mode: links back to the steps endpoint that resolve this work item's
-  // input / output files (null when the work item has no input / no outputs yet).
+  // input / output files
   inputFilesUrl?: string | null;
   outputFilesUrl?: string | null;
   // Resolve mode: the requested page of files for the requested kind, plus paging
@@ -307,7 +305,7 @@ async function getAllOutputCatalogFilenames(outputDir: string): Promise<string[]
  * @param requestedPage - the page requested via the work item's page parameter
  * @returns the pagination describing the (clamped) current page
  */
-function catalogPagination(total: number, requestedPage: number, perPage: number = CATALOG_PAGE_SIZE): ILengthAwarePagination {
+function catalogPagination(total: number, requestedPage: number, perPage: number): ILengthAwarePagination {
   const lastPage = Math.max(1, Math.ceil(total / perPage));
   const currentPage = Math.min(requestedPage, lastPage);
   const from = total === 0 ? 0 : (currentPage - 1) * perPage + 1;
@@ -322,7 +320,7 @@ function catalogPagination(total: number, requestedPage: number, perPage: number
 /**
  * Resolve one page of a work item's input files. The work item's single input
  * catalog can reference a huge number of items (e.g. an aggregating service), so
- * the catalog is enumerated once and only the requested page of items is read,
+ * the catalog is read once and only the requested page of items is read,
  * keeping the S3 reads bounded by `wiLimit`.
  *
  * @param req - the Express request, used to read the input page / wiLimit params
@@ -335,10 +333,10 @@ async function resolveInputFiles(
   req: HarmonyRequest, wi: WorkItem, frontendRoot: string, destinationBucket: string | undefined,
 ): Promise<WiResolvedFiles> {
   if (!wi.stacCatalogLocation) return { files: [] };
-  const perPage = parseIntegerParam(req, 'wilimit', CATALOG_PAGE_SIZE, 1, MAX_WI_PAGE_SIZE, true, true);
+  const perPage = parseIntegerParam(req, 'wilimit', DEFAULT_WI_LIMIT, 1, MAX_WI_LIMIT, true, true);
   const requestedPage = parseIntegerParam(req, `workitem${wi.id}inputpage`, 1, 1);
   try {
-    // Enumerate the catalog's item URLs once (one S3 read), then read only the
+    // Read the catalog's item URLs once, then read only the
     // requested page's slice of items.
     const itemUrls = await getCatalogItemUrls(wi.stacCatalogLocation);
     const pagination = catalogPagination(itemUrls.length, requestedPage, perPage);
@@ -354,8 +352,9 @@ async function resolveInputFiles(
 
 /**
  * Resolve one page of a work item's output files. A work item's outputs are a list
- * of catalog files; only the requested page of those catalogs is read (each fully)
- * so the S3 reads stay bounded by `wiLimit`.
+ * of catalog files; only the requested page of those catalogs is read completely
+ * so the S3 reads stay bounded by `wiLimit`, but the number of output files
+ * may exceed `wilimit`.
  *
  * @param req - the Express request, used to read the output page / wiLimit params
  * @param wi - the work item whose output catalogs should be resolved
@@ -367,7 +366,7 @@ async function resolveOutputFiles(
   req: HarmonyRequest, wi: WorkItem, frontendRoot: string, destinationBucket: string | undefined,
 ): Promise<WiResolvedFiles> {
   if (!COMPLETED_WORK_ITEM_STATUSES.includes(wi.status)) return { files: [] };
-  const perPage = parseIntegerParam(req, 'wilimit', CATALOG_PAGE_SIZE, 1, MAX_WI_PAGE_SIZE, true, true);
+  const perPage = parseIntegerParam(req, 'wilimit', DEFAULT_WI_LIMIT, 1, MAX_WI_LIMIT, true, true);
   const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
   const allCatalogUrls = await getAllOutputCatalogFilenames(outputDir);
   const requestedPage = parseIntegerParam(req, `workitem${wi.id}outputpage`, 1, 1);
