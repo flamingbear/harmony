@@ -229,7 +229,7 @@ describe('GET /jobs/:jobID/steps', function () {
     const inputPagedStep = buildWorkflowStep({
       jobID: inputPagedJob.jobID,
       stepIndex: 1,
-      serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
+      serviceID: 'nasa/batch-aggregator-service:2.4.1',
       workItemCount: 1,
       operation: validOperation,
     });
@@ -238,7 +238,7 @@ describe('GET /jobs/:jobID/steps', function () {
     const inputPagedWi = buildWorkItem({
       jobID: inputPagedJob.jobID,
       workflowStepIndex: 1,
-      serviceID: 'nasa/harmony-opendap-subsetter:1.2.4',
+      serviceID: 'nasa/batch-aggregator-service:2.4.1',
       status: WorkItemStatus.SUCCESSFUL,
       stacCatalogLocation: inputCatalogUrl,
     });

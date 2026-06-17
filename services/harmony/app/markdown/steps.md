@@ -15,11 +15,11 @@ As with the jobs API, there are two sets of steps API endpoints with the same su
 
 Returns the workflow steps for the given job, along with the work items processed by each step. Each step's work items are paged independently: by default up to 50 are shown per step (configurable with `limit`), and each step is navigated with its own `step<stepIndex>Page` parameter. A step with more than one page of work items includes a `paging` object with links to the other pages.
 
-A work item can reference or produce a very large number of files — for example a query-cmr step that fans out to thousands of granules, or an aggregating step whose single input catalog lists many items. To keep this overview responsive it does **not** read any files from storage: each work item instead carries `inputFilesUrl` and `outputFilesUrl` links (see [work item fields](#step-work-item-response)). The files themselves are resolved, and paged, only on demand by following those links — see [Resolving a work item's files](#steps-resolve-files).
+A work item can reference or produce a very large number of files - for example a query-cmr step that fans out to thousands of granules, or an aggregating step whose single input catalog lists many items. To keep the endpoint responsive, it does **not** read any files from storage. Instead, each work item has `inputFilesUrl` and `outputFilesUrl` links (see [work item fields](#step-work-item-response)). The files themselves are resolved, and paged, only on demand by following those links — see [Resolving a work item's files](#steps-resolve-files).
 
 #### <a name="steps-resolve-files"></a> Resolving a work item's files
 
-The default steps response is link-only and reads nothing from storage. To see a single work item's actual input or output files, follow its `inputFilesUrl` / `outputFilesUrl`, which request the steps endpoint scoped to that one work item:
+The default steps response is link-only and reads no stac catalogs thing from storage. To see a single work item's actual input or output files, follow its `inputFilesUrl` / `outputFilesUrl`, which make a request to the steps endpoint scoped to that one work item and sets the resolvedFiles parameter to either input or output as chosen:
 
 ```
 
@@ -28,7 +28,7 @@ The default steps response is link-only and reads nothing from storage. To see a
 ```
 **Example {{exampleCounter}}** - Resolving a work item's output files
 
-When `resolveFiles` is supplied, exactly one `workItem` must be given (otherwise the request is rejected). The matching work item is returned with the requested kind of files resolved inline:
+When `resolveFiles` is supplied and exactly one `workItem` is given, the work item is returned with the requested kind of files resolved inline:
 
 - `resolveFiles=input` populates `inputFiles` (and `inputFilesPaging`), reading a page of the work item's input STAC catalog items.
 - `resolveFiles=output` populates `outputFiles` (and `outputFilesPaging`), reading a page of the work item's output STAC catalogs.
