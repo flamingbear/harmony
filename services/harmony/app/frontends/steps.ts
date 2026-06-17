@@ -318,10 +318,48 @@ function catalogPagination(total: number, requestedPage: number, perPage: number
 }
 
 /**
+ * Resolve one page of a work item's files. The full list of paginated "units"
+ * (input item URLs within a single catalog, or output catalog URLs) is loaded,
+ * the requested page is sliced out, and only that slice is read into asset
+ * hrefs — keeping the S3 reads bounded by `wiLimit`. Validation errors on the
+ * `wilimit`/page parameters propagate (failing the request); I/O errors while
+ * loading or reading the page resolve to an empty file list.
+ *
+ * @param req - the Express request, used to read the page / wiLimit params
+ * @param pageParam - the per-work-item page query parameter for this kind
+ * @param loadUnits - loads the full ordered list of paginated units
+ * @param readPage - reads one page's slice of units into raw asset hrefs
+ * @param frontendRoot - the root URL to use when producing Harmony permalinks
+ * @param destinationBucket - the job's destinationUrl bucket name, or undefined
+ * @returns the page of public file links plus paging (paging omitted for one page)
+ */
+async function resolvePagedFiles(
+  req: HarmonyRequest,
+  pageParam: string,
+  loadUnits: () => Promise<string[]>,
+  readPage: (pageUnits: string[]) => Promise<string[]>,
+  frontendRoot: string,
+  destinationBucket: string | undefined,
+): Promise<WiResolvedFiles> {
+  const perPage = parseIntegerParam(req, 'wilimit', DEFAULT_WI_LIMIT, 1, MAX_WI_LIMIT, true, true);
+  const requestedPage = parseIntegerParam(req, pageParam, 1, 1);
+  try {
+    const units = await loadUnits();
+    const pagination = catalogPagination(units.length, requestedPage, perPage);
+    const start = (pagination.currentPage - 1) * perPage;
+    const hrefs = await readPage(units.slice(start, start + perPage));
+    const files = hrefs.map((h) => safePublicLink(h, frontendRoot, destinationBucket));
+    return { files, paging: buildFilesPaging(req, pagination, pageParam) };
+  } catch {
+    return { files: [] };
+  }
+}
+
+/**
  * Resolve one page of a work item's input files. The work item's single input
  * catalog can reference a huge number of items (e.g. an aggregating service), so
- * the catalog is read once and only the requested page of items is read,
- * keeping the S3 reads bounded by `wiLimit`.
+ * the catalog's item URLs are read once and only the requested page of items is
+ * read, keeping the S3 reads bounded by `wiLimit`.
  *
  * @param req - the Express request, used to read the input page / wiLimit params
  * @param wi - the work item whose input catalog should be resolved
@@ -333,21 +371,12 @@ async function resolveInputFiles(
   req: HarmonyRequest, wi: WorkItem, frontendRoot: string, destinationBucket: string | undefined,
 ): Promise<WiResolvedFiles> {
   if (!wi.stacCatalogLocation) return { files: [] };
-  const perPage = parseIntegerParam(req, 'wilimit', DEFAULT_WI_LIMIT, 1, MAX_WI_LIMIT, true, true);
-  const requestedPage = parseIntegerParam(req, `workitem${wi.id}inputpage`, 1, 1);
-  try {
-    // Read the catalog's item URLs once, then read only the
-    // requested page's slice of items.
-    const itemUrls = await getCatalogItemUrls(wi.stacCatalogLocation);
-    const pagination = catalogPagination(itemUrls.length, requestedPage, perPage);
-    const start = (pagination.currentPage - 1) * perPage;
-    const pageUrls = itemUrls.slice(start, start + perPage);
-    const items = await readItemsAtUrls(wi.stacCatalogLocation, pageUrls);
-    const files = getAllAssetHrefs(items).map((h) => safePublicLink(h, frontendRoot, destinationBucket));
-    return { files, paging: buildFilesPaging(req, pagination, `workitem${wi.id}inputpage`) };
-  } catch {
-    return { files: [] };
-  }
+  return resolvePagedFiles(
+    req, `workitem${wi.id}inputpage`,
+    () => getCatalogItemUrls(wi.stacCatalogLocation),
+    async (pageUrls) => getAllAssetHrefs(await readItemsAtUrls(wi.stacCatalogLocation, pageUrls)),
+    frontendRoot, destinationBucket,
+  );
 }
 
 /**
@@ -366,16 +395,13 @@ async function resolveOutputFiles(
   req: HarmonyRequest, wi: WorkItem, frontendRoot: string, destinationBucket: string | undefined,
 ): Promise<WiResolvedFiles> {
   if (!COMPLETED_WORK_ITEM_STATUSES.includes(wi.status)) return { files: [] };
-  const perPage = parseIntegerParam(req, 'wilimit', DEFAULT_WI_LIMIT, 1, MAX_WI_LIMIT, true, true);
   const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
-  const allCatalogUrls = await getAllOutputCatalogFilenames(outputDir);
-  const requestedPage = parseIntegerParam(req, `workitem${wi.id}outputpage`, 1, 1);
-  const pagination = catalogPagination(allCatalogUrls.length, requestedPage, perPage);
-  const start = (pagination.currentPage - 1) * perPage;
-  const pageUrls = allCatalogUrls.slice(start, start + perPage);
-  const hrefArrays = await Promise.all(pageUrls.map((url) => resolveDataHrefs(url)));
-  const files = hrefArrays.flat().map((h) => safePublicLink(h, frontendRoot, destinationBucket));
-  return { files, paging: buildFilesPaging(req, pagination, `workitem${wi.id}outputpage`) };
+  return resolvePagedFiles(
+    req, `workitem${wi.id}outputpage`,
+    () => getAllOutputCatalogFilenames(outputDir),
+    async (pageUrls) => (await Promise.all(pageUrls.map(resolveDataHrefs))).flat(),
+    frontendRoot, destinationBucket,
+  );
 }
 
 /**
