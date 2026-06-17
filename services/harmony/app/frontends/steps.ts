@@ -22,7 +22,7 @@ import { keysToLowerCase } from '../util/object';
 import { defaultObjectStore } from '../util/object-store';
 import { getPagingLinks, parseIntegerParam } from '../util/pagination';
 import { parseMultiValueParameter } from '../util/parameter-parsing-helpers';
-import { readCatalogItems, readCatalogItemsPage, StacItem } from '../util/stac';
+import { getCatalogItemUrls, readCatalogItems, readItemsAtUrls, StacItem } from '../util/stac';
 import { getRequestRoot } from '../util/url';
 
 const DEFAULT_WORKITEMS_PER_PAGE = 50;
@@ -168,9 +168,9 @@ function getAllAssetHrefs(items: StacItem[]): string[] {
  *   cannot be read (e.g. the service failed before producing it, or the
  *   catalog has no assets)
  */
-async function resolveDataHrefs(catalogUrl: string, logger?: Logger): Promise<string[]> {
+async function resolveDataHrefs(catalogUrl: string): Promise<string[]> {
   try {
-    const items = await readCatalogItems(catalogUrl, logger);
+    const items = await readCatalogItems(catalogUrl);
     return getAllAssetHrefs(items);
   } catch {
     return [];
@@ -339,15 +339,13 @@ async function resolveInputFiles(
   const perPage = parseIntegerParam(req, 'wilimit', CATALOG_PAGE_SIZE, 1, MAX_WI_PAGE_SIZE, true, true);
   const requestedPage = parseIntegerParam(req, `workitem${wi.id}inputpage`, 1, 1);
   try {
-    const first = await readCatalogItemsPage(
-      wi.stacCatalogLocation, (requestedPage - 1) * perPage, perPage, req.context.logger);
-    const pagination = catalogPagination(first.total, requestedPage, perPage);
-    // Re-read the clamped page when the requested page was beyond the last.
-    let { items } = first;
-    if (pagination.currentPage !== requestedPage) {
-      ({ items } = await readCatalogItemsPage(
-        wi.stacCatalogLocation, (pagination.currentPage - 1) * perPage, perPage, req.context.logger));
-    }
+    // Enumerate the catalog's item URLs once (one S3 read), then read only the
+    // requested page's slice of items.
+    const itemUrls = await getCatalogItemUrls(wi.stacCatalogLocation);
+    const pagination = catalogPagination(itemUrls.length, requestedPage, perPage);
+    const start = (pagination.currentPage - 1) * perPage;
+    const pageUrls = itemUrls.slice(start, start + perPage);
+    const items = await readItemsAtUrls(wi.stacCatalogLocation, pageUrls);
     const files = getAllAssetHrefs(items).map((h) => safePublicLink(h, frontendRoot, destinationBucket));
     return { files, paging: buildFilesPaging(req, pagination, `workitem${wi.id}inputpage`) };
   } catch {
@@ -377,7 +375,7 @@ async function resolveOutputFiles(
   const pagination = catalogPagination(allCatalogUrls.length, requestedPage, perPage);
   const start = (pagination.currentPage - 1) * perPage;
   const pageUrls = allCatalogUrls.slice(start, start + perPage);
-  const hrefArrays = await Promise.all(pageUrls.map((url) => resolveDataHrefs(url, req.context.logger)));
+  const hrefArrays = await Promise.all(pageUrls.map((url) => resolveDataHrefs(url)));
   const files = hrefArrays.flat().map((h) => safePublicLink(h, frontendRoot, destinationBucket));
   return { files, paging: buildFilesPaging(req, pagination, `workitem${wi.id}page`) };
 }
@@ -546,8 +544,7 @@ export async function getJobSteps(
       ? steps.filter((s) => q.steps.includes(s.stepIndex))
       : steps;
 
-    // Bound every page result by 'limit' and page each step independently
-    // via step<stepIndex>Page parameter.
+    // Bound workItems by 'limit' and page each step independently via step<stepIndex>Page parameter.
     const limit = parseIntegerParam(req, 'limit', DEFAULT_WORKITEMS_PER_PAGE, 1, MAX_WORKITEMS_PER_PAGE, true, true);
     const stepResults: StepWorkItems[] = await Promise.all(selectedSteps.map(async (step) => {
       const where: WorkItemQuery['where'] = { jobID, workflowStepIndex: step.stepIndex };
@@ -569,8 +566,6 @@ export async function getJobSteps(
     const frontendRoot = getRequestRoot(req);
     const allWorkItems = stepResults.flatMap((r) => r.workItems);
 
-    // Resolve mode resolves a single work item's files inline; the default
-    // overview does no S3 reads and returns links to resolve them on demand.
     let resolved: ResolvedFiles | undefined;
     if (q.resolveFiles !== undefined) {
       if (q.workItems === undefined || q.workItems.length !== 1) {
@@ -578,6 +573,7 @@ export async function getJobSteps(
       }
       resolved = await resolveSelectedWorkItemFiles(req, allWorkItems, q.resolveFiles, frontendRoot, destinationBucket);
     }
+
     const jobSteps = buildSteps(req, stepResults, statusCounts, q, resolved);
 
     const responseBody = {

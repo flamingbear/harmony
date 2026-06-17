@@ -105,19 +105,20 @@ export async function getCatalogItemUrls(catalogUrl: string): Promise<string[]> 
 }
 
 /**
- * Reads the content of the catalog and returns the catalog items
- * @param catalogUrl - the catalog s3 url
- * @param maxItems - if provided, read at most this many items (bounds the number
- *   of S3 reads for catalogs that reference a very large number of items)
+ * Reads the given STAC item URLs (each resolved relative to the catalog) and
+ * returns the items.
+ *
+ * @param catalogUrl - the catalog s3 url the item URLs are relative to
+ * @param itemUrls - the item URLs to read
+ * @returns the items at the given URLs
  */
-export async function readCatalogItems(catalogUrl: string, logger?: Logger): Promise<StacItem[]> {
+export async function readItemsAtUrls(
+  catalogUrl: string, itemUrls: string[]
+): Promise<StacItem[]> {
   const s3 = objectStoreForProtocol('s3');
-  const childLinks = await getCatalogItemUrls(catalogUrl);
-  logger?.info(`readCatalogItems found ${childLinks.length} items in CatalogUrl ${catalogUrl}.`);
-  logger?.info(`readCatalogItems urls: ${JSON.stringify(childLinks)}`);
 
   const items: StacItem[] = [];
-  for (const link of childLinks) {
+  for (const link of itemUrls) {
     const itemUrl = resolve(catalogUrl, link); // link has a relative path "./itemFile.json"
     const item = await s3.getObjectJson(itemUrl) as StacItem;
     items.push(item);
@@ -127,34 +128,14 @@ export async function readCatalogItems(catalogUrl: string, logger?: Logger): Pro
 }
 
 /**
- * Reads a single page of a STAC catalog's items. The catalog itself is read once
- * to enumerate every item URL (cheap, a single S3 read), and only the requested
- * `[offset, offset + limit)` slice of items is fetched. This keeps the number of
- * S3 reads bounded for catalogs that reference a very large number of items.
- *
+ * Reads the content of the catalog and returns all of its catalog items.
  * @param catalogUrl - the catalog s3 url
- * @param offset - the index of the first item to read
- * @param limit - the maximum number of items to read
  * @param logger - optional logger
- * @returns the page of items and the catalog's total item count
  */
-export async function readCatalogItemsPage(
-  catalogUrl: string, offset: number, limit: number, logger?: Logger,
-): Promise<{ items: StacItem[]; total: number }> {
-  const s3 = objectStoreForProtocol('s3');
-  const itemUrls = await getCatalogItemUrls(catalogUrl);
-  const total = itemUrls.length;
-  const pageUrls = itemUrls.slice(offset, offset + limit);
-  logger?.info(`readCatalogItemsPage reading ${pageUrls.length} of ${total} items (offset ${offset}) in CatalogUrl ${catalogUrl}.`);
+export async function readCatalogItems(catalogUrl: string): Promise<StacItem[]> {
+  const childLinks = await getCatalogItemUrls(catalogUrl);
 
-  const items: StacItem[] = [];
-  for (const link of pageUrls) {
-    const itemUrl = resolve(catalogUrl, link); // link has a relative path "./itemFile.json"
-    const item = await s3.getObjectJson(itemUrl) as StacItem;
-    items.push(item);
-  }
-
-  return { items, total };
+  return readItemsAtUrls(catalogUrl, childLinks);
 }
 
 /**
