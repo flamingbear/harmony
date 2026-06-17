@@ -323,7 +323,7 @@ function catalogPagination(total: number, requestedPage: number, perPage: number
  * @param readPage - reads one page's slice of source URLs into raw asset hrefs
  * @param frontendRoot - the root URL to use when producing Harmony permalinks
  * @param destinationBucket - the job's destinationUrl bucket name, or undefined
- * @returns the page of public file links plus paging (paging omitted for one page)
+ * @returns the page of public file links and paging if needed.
  */
 async function resolvePagedFiles(
   req: HarmonyRequest,
@@ -397,25 +397,23 @@ async function resolveOutputFiles(
 }
 
 /**
- * Resolve the requested kind (input or output) of files for the given workItems
- * inline. Only invoked in resolve mode, which is scoped to a single workItem, so
- * the S3 reads are bounded to that one workItem's requested page.
+ * Resolve the requested kind (input or output) of files for the given workItem
+ * inline.
  *
  * @param req - the Express request
- * @param workItems - the workItems to resolve (a single item in resolve mode)
- * @param kind - whether to resolve input or output files
+ * @param workItems - the workItems to resolve (a single item)
+ * @param kind - resolve input or output files
  * @param frontendRoot - the root URL to use when producing Harmony permalinks
  * @param destinationBucket - the job's destinationUrl bucket name, or undefined
  * @returns map of workItem id to its resolved page of files
  */
-async function resolveSelectedWorkItemFiles(
+async function resolveWorkItemFiles(
   req: HarmonyRequest,
   workItems: WorkItem[],
   kind: ResolveKind,
   frontendRoot: string,
   destinationBucket: string | undefined,
 ): Promise<ResolvedFiles> {
-  const startTime = new Date().getTime();
   const resolved: ResolvedFiles = new Map();
   await Promise.all(workItems.map(async (wi) => {
     const result = kind === 'input'
@@ -423,8 +421,6 @@ async function resolveSelectedWorkItemFiles(
       : await resolveOutputFiles(req, wi, frontendRoot, destinationBucket);
     resolved.set(wi.id, result);
   }));
-  const durationMs = new Date().getTime() - startTime;
-  req.context.logger.info('Finished steps:resolveSelectedWorkItemFiles', { durationMs });
   return resolved;
 }
 
@@ -587,7 +583,7 @@ export async function getJobSteps(
       if (q.workItems === undefined || q.workItems.length !== 1) {
         throw new RequestValidationError('resolveFiles requires exactly one workItem');
       }
-      resolved = await resolveSelectedWorkItemFiles(req, allWorkItems, q.resolveFiles, frontendRoot, destinationBucket);
+      resolved = await resolveWorkItemFiles(req, allWorkItems, q.resolveFiles, frontendRoot, destinationBucket);
     }
 
     const jobSteps = buildSteps(req, stepResults, statusCounts, q, resolved);
@@ -604,7 +600,7 @@ export async function getJobSteps(
       steps: jobSteps,
     };
     const durationMs = new Date().getTime() - startTime;
-    req.context.logger.info(`Finished /steps for ${jobID}`, { durationMs });
+    req.context.logger.info(`Finished steps endpoint for ${jobID}`, { durationMs });
     res.json(responseBody);
   } catch (e) {
     req.context.logger.error(e);
