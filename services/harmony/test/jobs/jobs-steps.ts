@@ -210,17 +210,17 @@ describe('GET /jobs/:jobID/steps', function () {
     await pagedStore.upload(
       JSON.stringify(catalogList), pagedLoc('batch-catalogs.json'), null, 'application/json',
     );
-    for (let i = 0; i < PAGED_OUTPUT_CATALOGS; i++) {
-      await pagedStore.upload(JSON.stringify({
+    await Promise.all(Array.from({ length: PAGED_OUTPUT_CATALOGS }, (_, i) => Promise.all([
+      pagedStore.upload(JSON.stringify({
         stac_version: '1.0.0', id: `cat${i}`, description: 'c',
         links: [{ rel: 'item', href: `./item${i}.json` }],
-      }), pagedLoc(`catalog${i}.json`), null, 'application/json');
-      await pagedStore.upload(JSON.stringify({
+      }), pagedLoc(`catalog${i}.json`), null, 'application/json'),
+      pagedStore.upload(JSON.stringify({
         stac_version: '1.0.0', id: `item${i}`, type: 'Feature',
         geometry: null, properties: {}, links: [],
         assets: { data: { href: `https://example.com/granule${i}.nc4`, roles: ['data'] } },
-      }), pagedLoc(`item${i}.json`), null, 'application/json');
-    }
+      }), pagedLoc(`item${i}.json`), null, 'application/json'),
+    ])));
 
     // A job whose work item's input catalog references INPUT_CATALOG_ITEMS items,
     // spanning more than one input page. The catalog and every item file are staged
