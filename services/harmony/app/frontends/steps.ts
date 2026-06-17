@@ -28,7 +28,7 @@ const DEFAULT_WORKITEMS_PER_PAGE = 50;
 const MAX_WORKITEMS_PER_PAGE = 1000;
 
 // Default number of a work item's input items / output catalogs resolved per page,
-// navigated with the per-work-item `workItem<id>InputPage` / `workItem<id>Page`
+// navigated with the per-work-item `workItem<id>InputPage` / `workItem<id>OutputPage`
 // parameters and overridable via the `wiLimit` query parameter. Bounds the S3 reads
 // each resolved page costs.
 const CATALOG_PAGE_SIZE = 50;
@@ -370,13 +370,13 @@ async function resolveOutputFiles(
   const perPage = parseIntegerParam(req, 'wilimit', CATALOG_PAGE_SIZE, 1, MAX_WI_PAGE_SIZE, true, true);
   const outputDir = getStacLocation({ id: wi.id, jobID: wi.jobID });
   const allCatalogUrls = await getAllOutputCatalogFilenames(outputDir);
-  const requestedPage = parseIntegerParam(req, `workitem${wi.id}page`, 1, 1);
+  const requestedPage = parseIntegerParam(req, `workitem${wi.id}outputpage`, 1, 1);
   const pagination = catalogPagination(allCatalogUrls.length, requestedPage, perPage);
   const start = (pagination.currentPage - 1) * perPage;
   const pageUrls = allCatalogUrls.slice(start, start + perPage);
   const hrefArrays = await Promise.all(pageUrls.map((url) => resolveDataHrefs(url)));
   const files = hrefArrays.flat().map((h) => safePublicLink(h, frontendRoot, destinationBucket));
-  return { files, paging: buildFilesPaging(req, pagination, `workitem${wi.id}page`) };
+  return { files, paging: buildFilesPaging(req, pagination, `workitem${wi.id}outputpage`) };
 }
 
 /**
@@ -422,7 +422,7 @@ async function resolveSelectedWorkItemFiles(
  *
  * In resolve mode the requested kind's files are populated inline from the
  * precomputed `resolved` map, with an `inputFilesPaging` / `outputFilesPaging`
- * block (navigated via the `workItem<id>InputPage` / `workItem<id>Page`
+ * block (navigated via the `workItem<id>InputPage` / `workItem<id>OutputPage`
  * parameter) when there is more than one page.
  *
  * @param req - the Express request, used to build links

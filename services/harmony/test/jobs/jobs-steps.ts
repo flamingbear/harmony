@@ -641,7 +641,7 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(wi.outputFilesPaging.lastPage).to.equal(2); // ceil(60 / 50)
       expect(wi.outputFilesPaging.total).to.equal(60);
       const next = wi.outputFilesPaging.links.find((l) => l.rel === 'next');
-      expect(next.href).to.include(`workitem${pagedOutputWiId}page=2`);
+      expect(next.href).to.include(`workitem${pagedOutputWiId}outputpage=2`);
       expect(wi.outputFilesPaging.links.find((l) => l.rel === 'prev')).to.be.undefined;
     });
   });
@@ -673,7 +673,7 @@ describe('GET /jobs/:jobID/steps', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
         jobID: pagedOutputJob.jobID,
-        query: { workItem: pagedOutputWiId, resolveFiles: 'output', [`workItem${pagedOutputWiId}Page`]: 2 },
+        query: { workItem: pagedOutputWiId, resolveFiles: 'output', [`workItem${pagedOutputWiId}OutputPage`]: 2 },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -686,7 +686,7 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(wi.outputFiles[0]).to.equal('https://example.com/granule50.nc4');
       expect(wi.outputFilesPaging.currentPage).to.equal(2);
       expect(wi.outputFilesPaging.links.find((l) => l.rel === 'prev').href)
-        .to.include(`workitem${pagedOutputWiId}page=1`);
+        .to.include(`workitem${pagedOutputWiId}outputpage=1`);
       expect(wi.outputFilesPaging.links.find((l) => l.rel === 'next')).to.be.undefined;
     });
   });
@@ -695,7 +695,7 @@ describe('GET /jobs/:jobID/steps', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
         jobID: pagedOutputJob.jobID,
-        query: { workItem: pagedOutputWiId, resolveFiles: 'output', [`workItem${pagedOutputWiId}Page`]: 9 },
+        query: { workItem: pagedOutputWiId, resolveFiles: 'output', [`workItem${pagedOutputWiId}OutputPage`]: 9 },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
