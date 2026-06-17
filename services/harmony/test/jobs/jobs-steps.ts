@@ -211,10 +211,13 @@ describe('GET /jobs/:jobID/steps', function () {
       JSON.stringify(catalogList), pagedLoc('batch-catalogs.json'), null, 'application/json',
     );
     await Promise.all(Array.from({ length: PAGED_OUTPUT_CATALOGS }, (_, i) => Promise.all([
+      // create individual stac catalogs listed in the batch-catalogs pointing
+      // at the item[n].json files
       pagedStore.upload(JSON.stringify({
         stac_version: '1.0.0', id: `cat${i}`, description: 'c',
         links: [{ rel: 'item', href: `./item${i}.json` }],
       }), pagedLoc(`catalog${i}.json`), null, 'application/json'),
+      // create the item[n].json catalogs with the file's href in it.
       pagedStore.upload(JSON.stringify({
         stac_version: '1.0.0', id: `item${i}`, type: 'Feature',
         geometry: null, properties: {}, links: [],
@@ -234,7 +237,8 @@ describe('GET /jobs/:jobID/steps', function () {
       operation: validOperation,
     });
     await inputPagedStep.save(this.trx);
-    const inputCatalogUrl = `s3://artifacts/${inputPagedJob.jobID}/input/catalog.json`;
+    const inputLoc = (f: string): string => `s3://artifacts/${inputPagedJob.jobID}/input/${f}`;
+    const inputCatalogUrl = inputLoc('catalog.json');
     const inputPagedWi = buildWorkItem({
       jobID: inputPagedJob.jobID,
       workflowStepIndex: 1,
@@ -254,7 +258,7 @@ describe('GET /jobs/:jobID/steps', function () {
         stac_version: '1.0.0', id: `input-item${i}`, type: 'Feature',
         geometry: null, properties: {}, links: [],
         assets: { data: { href: `https://example.com/input${i}.nc4`, roles: ['data'] } },
-      }), `s3://artifacts/${inputPagedJob.jobID}/input/item${i}.json`, null, 'application/json')));
+      }), inputLoc(`item${i}.json`), null, 'application/json')));
 
     // A job with a destinationUrl with a data asset is an s3:// href in
     // the user's destination bucket. Its single step has both a successful and
@@ -442,14 +446,14 @@ describe('GET /jobs/:jobID/steps', function () {
       const body = JSON.parse(this.res.text);
       const wi1 = body.steps[0].workItems[0];
       const wi2 = body.steps[1].workItems[0];
-      // The overview does no S3 reads: it never embeds inline files.
+
       expect(wi1).to.not.have.property('inputFiles');
       expect(wi1).to.not.have.property('outputFiles');
-      // wi1 (query-cmr, successful, no STAC input): no input link, output link present.
+
       expect(wi1.inputFilesUrl).to.be.null;
       expect(wi1.outputFilesUrl).to.include(`workitem=${wi1Id}`);
       expect(wi1.outputFilesUrl).to.include('resolvefiles=output');
-      // wi2 (failed, has an input catalog): both links present (failed is completed).
+
       expect(wi2.inputFilesUrl).to.include(`workitem=${wi2Id}`);
       expect(wi2.inputFilesUrl).to.include('resolvefiles=input');
       expect(wi2.outputFilesUrl).to.include(`workitem=${wi2Id}`);
@@ -539,12 +543,12 @@ describe('GET /jobs/:jobID/steps', function () {
 
   describe('For a job whose work item is still incomplete', function () {
     hookJobSteps({ jobID: runningJob.jobID, username: 'joe' });
-    it('leaves both file links null (no input, not yet completed)', function () {
+    it('leaves both input and ouput file links as null', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
       expect(wi.status).to.equal('ready');
-      // Not completed -> no output link; no STAC input -> no input link.
+
       expect(wi.outputFilesUrl).to.equal(null);
       expect(wi.inputFilesUrl).to.equal(null);
     });
@@ -633,7 +637,6 @@ describe('GET /jobs/:jobID/steps', function () {
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
       // 60 catalogs over a 50-catalog page: page 1 resolves exactly 50 files
-      // (one data asset per catalog), proving the rest were not read.
       expect(wi.outputFiles).to.have.lengthOf(50);
       expect(wi.outputFiles[0]).to.equal('https://example.com/granule0.nc4');
       expect(wi.outputFiles[49]).to.equal('https://example.com/granule49.nc4');
@@ -722,8 +725,7 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
-      // 60 items over a 50-item page: page 1 reads exactly 50 items, proving the
-      // rest were not read.
+      // 60 items over a 50-item page: page 1 reads exactly 50 items
       expect(wi.inputFiles).to.have.lengthOf(50);
       expect(wi.inputFiles[0]).to.equal('https://example.com/input0.nc4');
       expect(wi.inputFiles[49]).to.equal('https://example.com/input49.nc4');
@@ -790,7 +792,6 @@ describe('GET /jobs/:jobID/steps', function () {
       const body = JSON.parse(this.res.text);
       const workItem = body.steps[0].workItems[0];
       expect(workItem.outputFiles).to.deep.equal(['s3://user-bucket/out/granule_reformatted.tif']);
-      // A single output catalog means there is only one page, so no paging block.
       expect(workItem).to.not.have.property('outputFilesPaging');
     });
 
