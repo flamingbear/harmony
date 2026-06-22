@@ -442,22 +442,20 @@ describe('GET /jobs/:jobID/steps', function () {
       expect(body.steps[1].statuses).to.deep.equal({ failed: 1 });
     });
 
-    it('exposes link-only inputFilesUrl / outputFilesUrl fields and no inline files', function () {
+    it('exposes a link-only accessFilesUrl field and no inline files', function () {
       const body = JSON.parse(this.res.text);
       const wi1 = body.steps[0].workItems[0];
       const wi2 = body.steps[1].workItems[0];
 
       expect(wi1).to.not.have.property('inputFiles');
       expect(wi1).to.not.have.property('outputFiles');
+      expect(wi1.accessFilesUrl).to.include(`workitem=${wi1Id}`);
+      expect(wi1.accessFilesUrl).to.include('resolvefiles=true');
 
-      expect(wi1.inputFilesUrl).to.be.null;
-      expect(wi1.outputFilesUrl).to.include(`workitem=${wi1Id}`);
-      expect(wi1.outputFilesUrl).to.include('resolvefiles=output');
-
-      expect(wi2.inputFilesUrl).to.include(`workitem=${wi2Id}`);
-      expect(wi2.inputFilesUrl).to.include('resolvefiles=input');
-      expect(wi2.outputFilesUrl).to.include(`workitem=${wi2Id}`);
-      expect(wi2.outputFilesUrl).to.include('resolvefiles=output');
+      expect(wi2).to.not.have.property('inputFiles');
+      expect(wi2).to.not.have.property('outputFiles');
+      expect(wi2.accessFilesUrl).to.include(`workitem=${wi2Id}`);
+      expect(wi2.accessFilesUrl).to.include('resolvefiles=true');
     });
 
   });
@@ -543,14 +541,13 @@ describe('GET /jobs/:jobID/steps', function () {
 
   describe('For a job whose work item is still incomplete', function () {
     hookJobSteps({ jobID: runningJob.jobID, username: 'joe' });
-    it('leaves both input and ouput file links as null', function () {
+    it('leaves the access file link as null', function () {
       expect(this.res.statusCode).to.equal(200);
       const body = JSON.parse(this.res.text);
       const wi = body.steps[0].workItems[0];
       expect(wi.status).to.equal('ready');
 
-      expect(wi.outputFilesUrl).to.equal(null);
-      expect(wi.inputFilesUrl).to.equal(null);
+      expect(wi.accessFilesUrl).to.equal(null);
     });
   });
 
@@ -627,7 +624,7 @@ describe('GET /jobs/:jobID/steps', function () {
   describe('Resolving a work item with more than one page of output catalogs', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
-        jobID: pagedOutputJob.jobID, query: { workItem: pagedOutputWiId, resolveFiles: 'output' },
+        jobID: pagedOutputJob.jobID, query: { workItem: pagedOutputWiId, resolveFiles: true },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -652,7 +649,7 @@ describe('GET /jobs/:jobID/steps', function () {
   describe('When ?wiLimit= overrides the output-catalog page size', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
-        jobID: pagedOutputJob.jobID, query: { workItem: pagedOutputWiId, resolveFiles: 'output', wiLimit: 5 },
+        jobID: pagedOutputJob.jobID, query: { workItem: pagedOutputWiId, resolveFiles: true, wiLimit: 5 },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -676,7 +673,7 @@ describe('GET /jobs/:jobID/steps', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
         jobID: pagedOutputJob.jobID,
-        query: { workItem: pagedOutputWiId, resolveFiles: 'output', [`workItem${pagedOutputWiId}OutputPage`]: 2 },
+        query: { workItem: pagedOutputWiId, resolveFiles: true, [`workItem${pagedOutputWiId}OutputPage`]: 2 },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -698,7 +695,7 @@ describe('GET /jobs/:jobID/steps', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
         jobID: pagedOutputJob.jobID,
-        query: { workItem: pagedOutputWiId, resolveFiles: 'output', [`workItem${pagedOutputWiId}OutputPage`]: 9 },
+        query: { workItem: pagedOutputWiId, resolveFiles: true, [`workItem${pagedOutputWiId}OutputPage`]: 9 },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -716,7 +713,7 @@ describe('GET /jobs/:jobID/steps', function () {
   describe('Resolving a work item with more than one page of input items', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
-        jobID: inputPagedJob.jobID, query: { workItem: inputPagedWiId, resolveFiles: 'input' },
+        jobID: inputPagedJob.jobID, query: { workItem: inputPagedWiId, resolveFiles: true },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -742,7 +739,7 @@ describe('GET /jobs/:jobID/steps', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
         jobID: inputPagedJob.jobID,
-        query: { workItem: inputPagedWiId, resolveFiles: 'input', [`workItem${inputPagedWiId}InputPage`]: 2 },
+        query: { workItem: inputPagedWiId, resolveFiles: true, [`workItem${inputPagedWiId}InputPage`]: 2 },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -764,7 +761,7 @@ describe('GET /jobs/:jobID/steps', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
         jobID: inputPagedJob.jobID,
-        query: { workItem: inputPagedWiId, resolveFiles: 'input', [`workItem${inputPagedWiId}InputPage`]: 9 },
+        query: { workItem: inputPagedWiId, resolveFiles: true, [`workItem${inputPagedWiId}InputPage`]: 9 },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -782,7 +779,7 @@ describe('GET /jobs/:jobID/steps', function () {
   describe('For a job written to a user destinationUrl bucket', function () {
     before(async function () {
       this.res = await jobSteps(this.frontend, {
-        jobID: destBucketJob.jobID, query: { workItem: destWiId, resolveFiles: 'output' },
+        jobID: destBucketJob.jobID, query: { workItem: destWiId, resolveFiles: true },
       }).use(auth({ username: 'joe' }));
     });
     after(function () { delete this.res; });
@@ -1013,8 +1010,8 @@ describe('GET /jobs/:jobID/steps', function () {
       });
     });
 
-    describe('?resolveFiles=input without a workItem filter', function () {
-      hookJobSteps({ jobID: joeJob.jobID, username: 'joe', query: { resolveFiles: 'input' } });
+    describe('?resolveFiles=true without a workItem filter', function () {
+      hookJobSteps({ jobID: joeJob.jobID, username: 'joe', query: { resolveFiles: true } });
       it('returns 400', function () {
         expect(this.res.statusCode).to.equal(400);
       });
@@ -1028,10 +1025,10 @@ describe('GET /jobs/:jobID/steps', function () {
       });
     });
 
-    describe('?resolveFiles=input with more than one workItem', function () {
+    describe('?resolveFiles=true with more than one workItem', function () {
       before(async function () {
         this.res = await jobSteps(this.frontend, {
-          jobID: joeJob.jobID, query: { workItem: `${wi1Id},${wi2Id}`, resolveFiles: 'input' },
+          jobID: joeJob.jobID, query: { workItem: `${wi1Id},${wi2Id}`, resolveFiles: true },
         }).use(auth({ username: 'joe' }));
       });
       after(function () { delete this.res; });
@@ -1040,13 +1037,14 @@ describe('GET /jobs/:jobID/steps', function () {
         expect(this.res.statusCode).to.equal(200);
       });
 
-      it('resolves files inline for each requested work item', function () {
+      it('resolves both input and output files inline for each requested work item', function () {
         const body = JSON.parse(this.res.text);
         const workItems = body.steps.flatMap((s) => s.workItems);
         expect(workItems.map((wi) => wi.id)).to.have.members([wi1Id, wi2Id]);
         for (const wi of workItems) {
-          expect(wi).to.not.have.property('inputFilesUrl');
+          expect(wi).to.not.have.property('accessFilesUrl');
           expect(wi.inputFiles).to.be.an('array');
+          expect(wi.outputFiles).to.be.an('array');
         }
       });
     });

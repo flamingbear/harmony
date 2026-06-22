@@ -20,7 +20,7 @@ import { Link } from '../util/links';
 import { keysToLowerCase } from '../util/object';
 import { defaultObjectStore } from '../util/object-store';
 import { getPagingLinks, parseIntegerParam } from '../util/pagination';
-import { parseMultiValueParameter } from '../util/parameter-parsing-helpers';
+import { parseBoolean, ParameterParseError, parseMultiValueParameter } from '../util/parameter-parsing-helpers';
 import { getCatalogItemUrls, readCatalogItems, readItemsAtUrls, StacItem } from '../util/stac';
 import { getRequestRoot } from '../util/url';
 
@@ -43,24 +43,20 @@ const MAX_WI_LIMIT = 100;
 
 const VALID_STATUSES = Object.values(WorkItemStatus);
 
-type ResolveKind = 'input' | 'output';
-const VALID_RESOLVE_KINDS: ResolveKind[] = ['input', 'output'];
-
 interface StepsQueryParams {
   steps?: number[];
   statuses?: WorkItemStatus[];
   workItems?: number[];
-  resolveFiles?: ResolveKind;
+  resolveFiles?: boolean;
 }
 
 interface StepWorkItem {
   id: number;
   status: WorkItemStatus;
   retryCount: number;
-  // Links back to this steps endpoint that resolve input / output files
-  inputFilesUrl?: string | null;
-  outputFilesUrl?: string | null;
-  // The requested page of input or output files.
+  // Link back to this steps endpoint that resolves intermediate files.
+  accessFilesUrl?: string | null;
+  // The requested page of input and output files.
   inputFiles?: string[] | null;
   inputFilesPaging?: StepPaging;
   outputFiles?: string[] | null;
@@ -127,11 +123,14 @@ function parseQuery(query: Record<string, unknown>): StepsQueryParams {
   }
 
   if (query.resolvefiles !== undefined) {
-    const kind = query.resolvefiles as ResolveKind;
-    if (!VALID_RESOLVE_KINDS.includes(kind)) {
-      throw new RequestValidationError(`resolveFiles must be one of: ${VALID_RESOLVE_KINDS.join(', ')}`);
+    try {
+      out.resolveFiles = parseBoolean(query.resolvefiles as string);
+    } catch (e) {
+      if (e instanceof ParameterParseError) {
+        throw new RequestValidationError('resolveFiles must be true or false');
+      }
+      throw e;
     }
-    out.resolveFiles = kind;
   }
 
   return out;
@@ -210,21 +209,26 @@ interface WiResolvedFiles {
   paging?: StepPaging;
 }
 
-// Map of workItem id -> its resolved page of files
-type ResolvedFiles = Map<number, WiResolvedFiles>;
+// A single workItem's resolved page of input and output files
+interface WiAccessFiles {
+  input: WiResolvedFiles;
+  output: WiResolvedFiles;
+}
+
+// Map of workItem id -> resolved page of files
+type ResolvedFiles = Map<number, WiAccessFiles>;
 
 /**
  * Build the link, back to this same steps endpoint, that resolves a single work
- * item's input or output files inline.
+ * item's input and output files inline.
  *
  * @param req - the Express request, used for the host and current path
  * @param wiId - the workItem id to scope the link to
- * @param kind - whether the link resolves input or output files
  * @returns the absolute URL that resolves that workItem's files
  */
-function workItemFilesUrl(req: HarmonyRequest, wiId: number, kind: ResolveKind): string {
+function workItemFilesUrl(req: HarmonyRequest, wiId: number): string {
   const path = req.originalUrl.split('?')[0];
-  return `${getRequestRoot(req)}${path}?workitem=${wiId}&resolvefiles=${kind}`;
+  return `${getRequestRoot(req)}${path}?workitem=${wiId}&resolvefiles=true`;
 }
 
 /**
@@ -401,29 +405,27 @@ async function resolveOutputFiles(
 }
 
 /**
- * Resolve the requested kind (input or output) of files for the given workItem
- * inline.
+ * Resolve both the input and output files for the given workItems.
  *
  * @param req - the Express request
  * @param workItems - the workItems to resolve
- * @param kind - resolve input or output files
  * @param frontendRoot - the root URL to use when producing Harmony permalinks
  * @param destinationBucket - the job's destinationUrl bucket name, or undefined
- * @returns map of workItem id to its resolved page of files
+ * @returns map of workItem id to its resolved page of input and output files
  */
 async function resolveWorkItemFiles(
   req: HarmonyRequest,
   workItems: WorkItem[],
-  kind: ResolveKind,
   frontendRoot: string,
   destinationBucket: string | undefined,
 ): Promise<ResolvedFiles> {
   const resolved: ResolvedFiles = new Map();
   await Promise.all(workItems.map(async (wi) => {
-    const result = kind === 'input'
-      ? await resolveInputFiles(req, wi, frontendRoot, destinationBucket)
-      : await resolveOutputFiles(req, wi, frontendRoot, destinationBucket);
-    resolved.set(wi.id, result);
+    const [input, output] = await Promise.all([
+      resolveInputFiles(req, wi, frontendRoot, destinationBucket),
+      resolveOutputFiles(req, wi, frontendRoot, destinationBucket),
+    ]);
+    resolved.set(wi.id, { input, output });
   }));
   return resolved;
 }
@@ -431,17 +433,17 @@ async function resolveWorkItemFiles(
 /**
  * Build the workItem portion of the response.
  *
- * In overview mode a workItem carries `inputFilesUrl` / `outputFilesUrl` links
- * doing no S3 reads here.
+ * When not resolving files, a workItem has a link `accessFilesUrl` back to
+ * revolve the files.
  *
- * In resolve mode either input or output files are populated inline from the
- * precomputed `resolved` map, with an `inputFilesPaging` / `outputFilesPaging`
+ * When resolving, both input and output files are populated inline from the
+ * precomputed `resolved` map, each with an `inputFilesPaging` / `outputFilesPaging`
  * block when necessary.
  *
  * @param req - the Express request, used to build links
  * @param wi - the workItem to serialize
- * @param q - the parsed steps query (determines overview vs resolve mode)
- * @param resolved - the per-WI resolved files map (resolve mode only)
+ * @param q - the parsed steps query (resolving or not mode)
+ * @param resolved - the per-WI resolved files map (resolving only)
  * @returns the workItem shaped for the steps response
  */
 function buildWorkItem(
@@ -452,20 +454,22 @@ function buildWorkItem(
 ): StepWorkItem {
   const base = { id: wi.id, status: wi.status, retryCount: wi.retryCount };
 
-  if (q.resolveFiles === undefined) {
+  if (!q.resolveFiles) {
+    const showFilesUrl = !!wi.stacCatalogLocation || COMPLETED_WORK_ITEM_STATUSES.includes(wi.status);
     return {
       ...base,
-      inputFilesUrl: wi.stacCatalogLocation ? workItemFilesUrl(req, wi.id, 'input') : null,
-      outputFilesUrl: COMPLETED_WORK_ITEM_STATUSES.includes(wi.status)
-        ? workItemFilesUrl(req, wi.id, 'output') : null,
+      accessFilesUrl: showFilesUrl ? workItemFilesUrl(req, wi.id) : null,
     };
   }
 
-  const { files, paging } = resolved?.get(wi.id) ?? { files: [] };
-  if (q.resolveFiles === 'input') {
-    return { ...base, inputFiles: files, ...(paging !== undefined && { inputFilesPaging: paging }) };
-  }
-  return { ...base, outputFiles: files, ...(paging !== undefined && { outputFilesPaging: paging }) };
+  const { input, output } = resolved?.get(wi.id) ?? { input: { files: [] }, output: { files: [] } };
+  return {
+    ...base,
+    inputFiles: input.files,
+    ...(input.paging !== undefined && { inputFilesPaging: input.paging }),
+    outputFiles: output.files,
+    ...(output.paging !== undefined && { outputFilesPaging: output.paging }),
+  };
 }
 
 
@@ -579,11 +583,11 @@ export async function getJobSteps(
     const allWorkItems = stepResults.flatMap((r) => r.workItems);
 
     let resolved: ResolvedFiles | undefined;
-    if (q.resolveFiles !== undefined) {
+    if (q.resolveFiles) {
       if (q.workItems === undefined || q.workItems.length < 1) {
         throw new RequestValidationError('resolveFiles requires one or more workItems');
       }
-      resolved = await resolveWorkItemFiles(req, allWorkItems, q.resolveFiles, frontendRoot, destinationBucket);
+      resolved = await resolveWorkItemFiles(req, allWorkItems, frontendRoot, destinationBucket);
     }
 
     const jobSteps = buildSteps(req, stepResults, statusCounts, q, resolved);
